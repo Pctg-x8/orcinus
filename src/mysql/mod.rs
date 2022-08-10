@@ -3,6 +3,7 @@ use std::task::Poll;
 use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
 use tokio::io::{AsyncReadExt, Result as IOResult};
 
+mod authentication;
 mod protos;
 
 fn decompose_packet_header(bytes: u32) -> self::protos::PacketHeader {

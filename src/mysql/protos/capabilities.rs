@@ -1,6 +1,5 @@
 use super::super::PacketReader;
 
-
 /// https://dev.mysql.com/doc/internals/en/capability-flags.html#packet-Protocol::CapabilityFlags
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -10,12 +9,20 @@ impl CapabilityFlags {
         Self(0)
     }
 
-    pub async fn read_lower_bits(reader: &mut (impl PacketReader + Unpin)) -> std::io::Result<Self> {
+    pub async fn read_lower_bits(
+        reader: &mut (impl PacketReader + Unpin),
+    ) -> std::io::Result<Self> {
         reader.read_u16_le().await.map(|x| Self(x as _))
     }
 
-    pub async fn additional_read_upper_bits(self, reader: &mut (impl PacketReader + Unpin)) -> std::io::Result<Self> {
-        reader.read_u16_le().await.map(|x| Self((x as u32) << 16 | self.0))
+    pub async fn additional_read_upper_bits(
+        self,
+        reader: &mut (impl PacketReader + Unpin),
+    ) -> std::io::Result<Self> {
+        reader
+            .read_u16_le()
+            .await
+            .map(|x| Self((x as u32) << 16 | self.0))
     }
 
     pub fn use_long_password(&self) -> bool {
@@ -50,6 +57,10 @@ impl CapabilityFlags {
         self
     }
 
+    pub fn support_transaction(&self) -> bool {
+        (self.0 & 0x0000_2000) != 0
+    }
+
     pub fn support_secure_connection(&self) -> bool {
         (self.0 & 0x0000_8000) != 0
     }
@@ -80,5 +91,9 @@ impl CapabilityFlags {
     pub fn set_support_plugin_auth_lenenc_client_data(&mut self) -> &mut Self {
         self.0 |= 0x0020_0000;
         self
+    }
+
+    pub fn support_session_track(&self) -> bool {
+        (self.0 & 0x0080_0000) != 0
     }
 }
