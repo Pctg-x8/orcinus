@@ -1,15 +1,20 @@
 use std::io::{SeekFrom, Write};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use futures_util::{
+    future::{BoxFuture, LocalBoxFuture},
+    pin_mut, FutureExt,
+};
+use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 use self::{capabilities::CapabilityFlags, status::StatusFlags};
+use super::PacketReader;
 
 pub struct PacketHeader {
     pub payload_length: u32,
     pub sequence_id: u8,
 }
 impl PacketHeader {
-    pub async fn write(&self, writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
+    pub async fn write(self, writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
         writer
             .write_all(&[
                 (self.payload_length & 0xff) as u8,
@@ -32,6 +37,23 @@ pub async fn write_packet(
     .write(writer)
     .await?;
     writer.write_all(payload).await
+}
+
+pub trait ClientPacket {
+    fn serialize_payload(&self) -> Vec<u8>;
+
+    fn write_packet<'a>(
+        &'a self,
+        writer: &'a mut (impl AsyncWriteExt + Unpin),
+        sequence_id: u8,
+    ) -> LocalBoxFuture<'a, std::io::Result<()>> {
+        async move {
+            let payload = self.serialize_payload();
+
+            write_packet(writer, &payload, sequence_id).await
+        }
+        .boxed_local()
+    }
 }
 
 #[repr(transparent)]
@@ -135,7 +157,6 @@ pub enum OKPacketCapabilityExtraData {
     },
 }
 pub struct OKPacket {
-    pub is_eof: bool,
     pub affected_rows: u64,
     pub last_insert_id: u64,
     pub capability_extra: Option<OKPacketCapabilityExtraData>,
@@ -143,14 +164,13 @@ pub struct OKPacket {
     pub session_state_changes: Option<String>,
 }
 impl OKPacket {
-    pub async fn read_packet(
+    pub async fn read(
+        payload_size: usize,
         reader: &mut (impl super::PacketReader + Unpin + AsyncSeekExt),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let first_pos = reader.seek(SeekFrom::Current(0)).await?;
+        let current_pos = reader.seek(SeekFrom::Current(0)).await?;
 
-        let header = reader.read_u8().await?;
         let LengthEncodedInteger(affected_rows) = LengthEncodedInteger::read(reader).await?;
         let LengthEncodedInteger(last_insert_id) = LengthEncodedInteger::read(reader).await?;
         let capability_extra = if client_capability.support_41_protocol() {
@@ -197,8 +217,8 @@ impl OKPacket {
                 )
             }
         } else {
-            let rest_length = packet_header.payload_length as u64
-                - (reader.seek(SeekFrom::Current(0)).await? - first_pos);
+            let rest_length =
+                payload_size as u64 - (reader.seek(SeekFrom::Current(0)).await? - current_pos);
             let mut info_bytes = Vec::with_capacity(rest_length as _);
             unsafe {
                 info_bytes.set_len(rest_length as _);
@@ -209,7 +229,6 @@ impl OKPacket {
         };
 
         Ok(Self {
-            is_eof: header == 0xfe && packet_header.payload_length < 9,
             affected_rows,
             last_insert_id,
             capability_extra,
@@ -219,6 +238,101 @@ impl OKPacket {
     }
 }
 
+pub struct ErrPacket {
+    pub code: u16,
+    pub sql_state: Option<[u8; 5]>,
+    pub error_message: String,
+}
+impl ErrPacket {
+    pub async fn read(
+        payload_size: usize,
+        reader: &mut (impl super::PacketReader + Unpin + AsyncSeekExt),
+        client_capabilities: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let current_pos = reader.seek(SeekFrom::Current(0)).await?;
+        let code = reader.read_u16_le().await?;
+        let sql_state = if client_capabilities.support_41_protocol() {
+            reader.seek(SeekFrom::Current(1)).await?;
+            let mut sql_state = [0u8; 5];
+            reader.read_exact(&mut sql_state).await?;
+            Some(sql_state)
+        } else {
+            None
+        };
+        let error_message_len =
+            payload_size - (reader.seek(SeekFrom::Current(0)).await? - current_pos) as usize;
+        let mut em_bytes = Vec::with_capacity(error_message_len);
+        unsafe {
+            em_bytes.set_len(error_message_len);
+        }
+        reader.read_exact(&mut em_bytes).await?;
+
+        Ok(Self {
+            code,
+            sql_state,
+            error_message: unsafe { String::from_utf8_unchecked(em_bytes) },
+        })
+    }
+}
+
+pub struct EOFPacket41 {
+    pub warnings: u16,
+    pub status_flags: StatusFlags,
+}
+impl EOFPacket41 {
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+        Ok(Self {
+            warnings: reader.read_u16_le().await?,
+            status_flags: StatusFlags(reader.read_u16_le().await?),
+        })
+    }
+}
+
+pub enum OKOrEOFPacket {
+    OK(OKPacket),
+    EOF41(EOFPacket41),
+    EOF,
+}
+pub enum GenericResultPacket {
+    OK(OKPacket),
+    Err(ErrPacket),
+    EOF41(EOFPacket41),
+    EOF,
+}
+impl GenericResultPacket {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin + AsyncSeekExt),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+
+        let header = reader.read_u8().await?;
+        match header {
+            0x00 => OKPacket::read(packet_header.payload_length as _, reader, client_capability)
+                .await
+                .map(Self::OK),
+            0xfe if client_capability.support_41_protocol() => {
+                EOFPacket41::read(reader).await.map(Self::EOF41)
+            }
+            0xfe => Ok(Self::EOF),
+            0xff => ErrPacket::read(packet_header.payload_length as _, reader, client_capability)
+                .await
+                .map(Self::Err),
+            _ => unreachable!("invalid generic response type"),
+        }
+    }
+
+    pub fn to_result(self) -> Result<OKOrEOFPacket, ErrPacket> {
+        match self {
+            Self::OK(o) => Ok(OKOrEOFPacket::OK(o)),
+            Self::EOF41(e) => Ok(OKOrEOFPacket::EOF41(e)),
+            Self::EOF => Ok(OKOrEOFPacket::EOF),
+            Self::Err(e) => Err(e),
+        }
+    }
+}
+
 mod capabilities;
 mod handshake;
 mod status;
+mod text;

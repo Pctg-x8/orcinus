@@ -113,8 +113,8 @@ pub struct HandshakeResponse41<'s> {
     pub auth_plugin_name: Option<&'s str>,
     pub connect_attrs: HashMap<&'s str, &'s str>,
 }
-impl HandshakeResponse41<'_> {
-    pub fn serialize_payload(&self) -> Vec<u8> {
+impl super::ClientPacket for HandshakeResponse41<'_> {
+    fn serialize_payload(&self) -> Vec<u8> {
         let mut sink = Vec::with_capacity(128);
 
         let mut caps = CapabilityFlags::new();
@@ -215,8 +215,8 @@ pub struct HandshakeResponse320<'s> {
     pub auth_response: &'s [u8],
     pub database: Option<&'s str>,
 }
-impl HandshakeResponse320<'_> {
-    pub fn serialize_payload(&self) -> Vec<u8> {
+impl super::ClientPacket for HandshakeResponse320<'_> {
+    fn serialize_payload(&self) -> Vec<u8> {
         let mut sink = Vec::with_capacity(48);
 
         let mut caps = CapabilityFlags::new();
