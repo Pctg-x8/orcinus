@@ -1,12 +1,7 @@
 use std::{pin::Pin, task::Poll};
 
-use futures_util::{
-    future::{BoxFuture, LocalBoxFuture},
-    pin_mut, FutureExt, TryFutureExt,
-};
+use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncReadExt, Result as IOResult};
-
-use self::protos::LengthEncodedInteger;
 
 pub mod authentication;
 pub mod protos;
@@ -72,6 +67,10 @@ impl<R> ReadCounted<R> {
             inner,
             counter: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
     }
 
     pub fn read_bytes(&self) -> usize {

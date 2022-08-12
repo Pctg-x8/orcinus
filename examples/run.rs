@@ -176,12 +176,12 @@ async fn main() {
                 .expect("Failed to read column def"),
         );
     }
-    println!("columns: {columns:#?}");
     if !client_capability.support_deprecate_eof() {
         orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
             .await
             .expect("Failed to read eof packet of columns");
     }
+    println!("columns: {columns:#?}");
     loop {
         let rs = orcinus::protos::Resultset41::read_packet(&mut stream, client_capability)
             .await
@@ -220,6 +220,126 @@ async fn main() {
             }
         }
     }
+
+    orcinus::protos::StmtPrepareCommand("Select * from friends where id=?")
+        .write_packet(&mut stream, 0)
+        .await
+        .expect("Failed to write prepare command");
+    stream.flush().await.expect("Failed to flush stream");
+    let resp = orcinus::protos::StmtPrepareResult::read_packet(&mut stream, client_capability)
+        .await
+        .expect("Failed to read prepare result packet")
+        .into_result()
+        .expect("Failed to prepare stmt");
+    println!("stmt prepare: {resp:?}");
+    let mut params = Vec::with_capacity(resp.num_params as _);
+    for _ in 0..resp.num_params {
+        params.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read params packet"),
+        );
+    }
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read EOF packet");
+    }
+    let mut columns = Vec::with_capacity(resp.num_columns as _);
+    for _ in 0..resp.num_columns {
+        columns.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read params packet"),
+        );
+    }
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read EOF packet");
+    }
+    println!("params: {params:#?}");
+    println!("columns: {columns:#?}");
+
+    let parameters = [(orcinus::protos::BinaryProtocolValue::LongLong(73), false)];
+    orcinus::protos::StmtExecuteCommand {
+        statement_id: resp.statement_id,
+        flags: orcinus::protos::StmtExecuteFlags::new(),
+        parameters: &parameters,
+        requires_rebound_parameters: true,
+    }
+    .write_packet(&mut stream, 0)
+    .await
+    .expect("Failed to write execute packet");
+    stream.flush().await.expect("Failed to flush stream");
+    let exec_resp = orcinus::protos::StmtExecuteResult::read_packet(&mut stream, client_capability)
+        .await
+        .expect("Failed to read stmt execute result");
+    let column_count = match exec_resp {
+        orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
+        _ => unreachable!("unexpected select statement result"),
+    };
+    let mut columns = Vec::with_capacity(column_count as _);
+    for _ in 0..column_count {
+        columns.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read column packet"),
+        );
+    }
+    loop {
+        let rs = orcinus::protos::BinaryResultset41::read_packet(
+            &mut stream,
+            client_capability,
+            column_count as _,
+        )
+        .await
+        .expect("Failed to read resultset");
+        match rs {
+            orcinus::protos::BinaryResultset41::Row(r) => {
+                println!("row: {r:?}");
+            }
+            orcinus::protos::BinaryResultset41::Ok(ok) => {
+                println!(
+                    "ok more_result={:?} warnings={}",
+                    match ok.capability_extra {
+                        Some(orcinus::protos::OKPacketCapabilityExtraData::Protocol41 {
+                            status_flags,
+                            ..
+                        }) => status_flags,
+                        Some(orcinus::protos::OKPacketCapabilityExtraData::Transactions {
+                            status_flags,
+                        }) => status_flags,
+                        None => orcinus::protos::StatusFlags::new(),
+                    }
+                    .more_result_exists(),
+                    match ok.capability_extra {
+                        Some(orcinus::protos::OKPacketCapabilityExtraData::Protocol41 {
+                            warnings,
+                            ..
+                        }) => warnings,
+                        _ => 0,
+                    }
+                );
+                break;
+            }
+            orcinus::protos::BinaryResultset41::EOF(eof) => {
+                println!(
+                    "eof more_result={:?}",
+                    eof.status_flags.more_result_exists()
+                );
+                break;
+            }
+            orcinus::protos::BinaryResultset41::Err(e) => {
+                panic!("Resultset Errored {e:?}");
+            }
+        }
+    }
+
+    orcinus::protos::StmtCloseCommand(resp.statement_id)
+        .write_packet(&mut stream, 0)
+        .await
+        .expect("Failed to write stmt close command");
 
     orcinus::protos::QuitCommand
         .write_packet(&mut stream, 0)

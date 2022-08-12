@@ -421,6 +421,83 @@ impl GenericResultPacket {
     }
 }
 
+#[derive(Debug)]
+pub enum GenericOKErrPacket {
+    Ok(OKPacket),
+    Err(ErrPacket),
+}
+impl GenericOKErrPacket {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin),
+        client_capabilities: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
+        let first_byte = reader.read_u8().await?;
+
+        match first_byte {
+            0xff => ErrPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capabilities,
+            )
+            .await
+            .map(Self::Err),
+            0x00 => OKPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capabilities,
+            )
+            .await
+            .map(Self::Ok),
+            _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+        }
+    }
+
+    #[inline]
+    pub fn into_result(self) -> Result<OKPacket, ErrPacket> {
+        match self {
+            Self::Ok(o) => Ok(o),
+            Self::Err(e) => Err(e),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ColumnType {
+    Decimal = 0x00,
+    Tiny = 0x01,
+    Short = 0x02,
+    Long = 0x03,
+    Float = 0x04,
+    Double = 0x05,
+    Null = 0x06,
+    Timestamp = 0x07,
+    LongLong = 0x08,
+    Int24 = 0x09,
+    Date = 0x0a,
+    Time = 0x0b,
+    DateTime = 0x0c,
+    Year = 0x0d,
+    NewDate = 0x0e,
+    Varchar = 0x0f,
+    Bit = 0x10,
+    Timestamp2 = 0x11,
+    DAteTime2 = 0x12,
+    Time2 = 0x13,
+    NewDecimal = 0xf6,
+    Enum = 0xf7,
+    Set = 0xf8,
+    TinyBlob = 0xf9,
+    MediumBlob = 0xfa,
+    LongBlob = 0xfb,
+    Blob = 0xfc,
+    VarString = 0xfd,
+    String = 0xfe,
+    Geometry = 0xff,
+}
+
 mod capabilities;
 pub use self::capabilities::*;
 mod handshake;
@@ -429,3 +506,7 @@ mod status;
 pub use self::status::*;
 mod text;
 pub use self::text::*;
+mod prepared;
+pub use self::prepared::*;
+mod binary;
+pub use self::binary::*;
