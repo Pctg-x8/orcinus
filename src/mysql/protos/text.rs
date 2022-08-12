@@ -4,3 +4,6 @@ impl super::ClientPacket for QuitCommand {
         vec![0x01]
     }
 }
+
+mod query;
+pub use self::query::*;

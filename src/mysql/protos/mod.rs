@@ -73,7 +73,13 @@ impl LengthEncodedInteger {
 
     pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
         let first_byte = reader.read_u8().await?;
+        Self::read_ahead(first_byte, reader).await
+    }
 
+    pub async fn read_ahead(
+        first_byte: u8,
+        reader: &mut (impl AsyncReadExt + Unpin),
+    ) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => reader.read_u16_le().await.map(|x| Self(x as _)),

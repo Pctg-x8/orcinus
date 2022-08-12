@@ -92,7 +92,7 @@ async fn main() {
                     } else {
                         orcinus::protos::HandshakeResponse41AuthResponse::Plain(&auth_response)
                     },
-                    database: None,
+                    database: Some("sandstar"),
                     auth_plugin_name: p.auth_plugin_name.as_deref(),
                     connect_attrs: Default::default(),
                 };
@@ -107,7 +107,7 @@ async fn main() {
                     max_packet_size: 10,
                     username: "root",
                     auth_response: &auth_response,
-                    database: None,
+                    database: Some("sandstar"),
                 };
                 client_capability = resp.compute_final_capability_flags();
 
@@ -151,11 +151,21 @@ async fn main() {
     let resp = orcinus::protos::GenericResultPacket::read_packet(&mut stream, client_capability)
         .await
         .expect("Failed to read handshake response");
-    println!("{resp:?}");
+    println!("connection: {resp:?}");
 
-    sequence_id += 1;
+    orcinus::protos::QueryCommand("Select * from friends")
+        .write_packet(&mut stream, 0)
+        .await
+        .expect("Failed to send query command");
+    stream.flush().await.expect("Failed to flush buffer");
+    let qc_result =
+        orcinus::protos::QueryCommandResponse::read_packet(&mut stream, client_capability)
+            .await
+            .expect("Failed to read query command result");
+    println!("result: {qc_result:?}");
+
     orcinus::protos::QuitCommand
-        .write_packet(&mut stream, sequence_id)
+        .write_packet(&mut stream, 0)
         .await
         .expect("Failed to send quit command");
     stream.flush().await.expect("Failed to flush buffer");
