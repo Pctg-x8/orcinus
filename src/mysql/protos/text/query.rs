@@ -208,6 +208,17 @@ impl Resultset41 {
         let r1 = reader.read_u8().await?;
 
         match r1 {
+            0xfe if !client_capabilities.support_deprecate_eof() => {
+                EOFPacket41::read(&mut reader).await.map(Self::EOF)
+            }
+            // treat as OK Packet for client supports DEPRECATE_EOF capability
+            0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capabilities,
+            )
+            .await
+            .map(Self::Ok),
             0x00 => OKPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -215,7 +226,6 @@ impl Resultset41 {
             )
             .await
             .map(Self::Ok),
-            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
             0xff => ErrPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
