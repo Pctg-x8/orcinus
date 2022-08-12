@@ -4,7 +4,7 @@ use crate::{PacketReader, ReadCounted};
 
 use super::{
     serialize_null_bitmap, serialize_value_types, serialize_values, BinaryProtocolValue,
-    CapabilityFlags, EOFPacket41, ErrPacket, OKPacket, LengthEncodedInteger,
+    CapabilityFlags, ErrPacket, LengthEncodedInteger, OKPacket,
 };
 
 pub struct StmtPrepareCommand<'s>(pub &'s str);
@@ -191,7 +191,8 @@ impl StmtExecuteResult {
             .await
             .map(Self::Err),
             _ => {
-                let LengthEncodedInteger(column_count) = LengthEncodedInteger::read_ahead(r1, reader.into_inner()).await?;
+                let LengthEncodedInteger(column_count) =
+                    LengthEncodedInteger::read_ahead(r1, reader.into_inner()).await?;
                 Ok(Self::Resultset { column_count })
             }
         }

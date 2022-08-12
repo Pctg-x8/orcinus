@@ -6,7 +6,7 @@ use crate::ReadCounted;
 
 use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
-use super::LengthEncodedInteger;
+use super::{ErrPacket, LengthEncodedInteger, OKPacket};
 
 #[derive(Debug)]
 pub struct HandshakeV10Short {
@@ -287,5 +287,46 @@ impl AuthMoreData {
         }
         reader.read_exact(&mut content).await?;
         Ok(Self(content))
+    }
+}
+
+pub enum HandshakeResult {
+    Ok(OKPacket),
+    Err(ErrPacket),
+}
+impl HandshakeResult {
+    pub async fn read_packet(
+        reader: &mut (impl AsyncReadExt + Unpin),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
+        let head_byte = reader.read_u8().await?;
+
+        match head_byte {
+            0xff => ErrPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .await
+            .map(Self::Err),
+            0x00 => OKPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .await
+            .map(Self::Ok),
+            _ => unreachable!("unexpected handshake result payload header: 0x{head_byte:02x}"),
+        }
+    }
+
+    #[inline]
+    pub fn into_result(self) -> Result<OKPacket, ErrPacket> {
+        match self {
+            Self::Ok(o) => Ok(o),
+            Self::Err(e) => Err(e),
+        }
     }
 }

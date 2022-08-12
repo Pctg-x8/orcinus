@@ -149,9 +149,11 @@ async fn main() {
             .expect("Failed to send auth response");
     }
 
-    let resp = orcinus::protos::GenericResultPacket::read_packet(&mut stream, client_capability)
+    let resp = orcinus::protos::HandshakeResult::read_packet(&mut stream, client_capability)
         .await
-        .expect("Failed to read handshake response");
+        .expect("Failed to read handshake result")
+        .into_result()
+        .expect("Failed to handshake");
     println!("connection: {resp:?}");
 
     orcinus::protos::QueryCommand("Select * from friends")
