@@ -137,6 +137,11 @@ impl ColumnDefinition41 {
     }
 }
 
+#[derive(Debug)]
+pub enum ResultsetValue<'s> {
+    Null,
+    Value(&'s str),
+}
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct ResultsetRow(Vec<u8>);
@@ -152,6 +157,38 @@ impl ResultsetRow {
         reader.read_exact(&mut packet_content).await?;
 
         Ok(Self(packet_content))
+    }
+
+    pub fn decompose_values<'s>(&'s self) -> ResultsetValueDecomposer<'s> {
+        ResultsetValueDecomposer(std::io::Cursor::new(&self.0))
+    }
+}
+
+pub struct ResultsetValueDecomposer<'s>(std::io::Cursor<&'s [u8]>);
+impl<'s> Iterator for ResultsetValueDecomposer<'s> {
+    type Item = ResultsetValue<'s>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.get_ref().len() == self.0.position() as usize {
+            return None;
+        }
+
+        match self.0.get_ref()[self.0.position() as usize] {
+            0xfb => {
+                self.0.set_position(self.0.position() + 1);
+                Some(ResultsetValue::Null)
+            }
+            _ => {
+                let LengthEncodedInteger(len) = LengthEncodedInteger::read_sync(&mut self.0)
+                    .expect("Failed to read resultset bytes");
+                let s = &self.0.get_ref()
+                    [self.0.position() as usize..(self.0.position() + len) as usize];
+                self.0.set_position(self.0.position() + len);
+                Some(ResultsetValue::Value(unsafe {
+                    std::str::from_utf8_unchecked(s)
+                }))
+            }
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::io::Write;
 
 use futures_util::{future::LocalBoxFuture, FutureExt};
@@ -68,6 +69,31 @@ impl LengthEncodedInteger {
             4
         } else {
             9
+        }
+    }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut first_byte = [0u8; 1];
+        reader.read_exact(&mut first_byte)?;
+
+        match first_byte[0] {
+            x if x < 251 => Ok(Self(first_byte[0] as _)),
+            0xfc => {
+                let mut value = [0u8; 2];
+                reader.read_exact(&mut value)?;
+                Ok(Self(u16::from_le_bytes(value) as _))
+            }
+            0xfd => {
+                let mut bytes = [0u8; 4];
+                reader.read_exact(&mut bytes[..3])?;
+                Ok(Self(u32::from_le_bytes(bytes) as _))
+            }
+            0xfe => {
+                let mut value = [0u8; 8];
+                reader.read_exact(&mut value)?;
+                Ok(Self(u64::from_le_bytes(value)))
+            }
+            _ => unreachable!("0x{:02x}", first_byte[0]),
         }
     }
 
@@ -316,7 +342,9 @@ pub struct EOFPacket41 {
     pub status_flags: StatusFlags,
 }
 impl EOFPacket41 {
-    pub async fn expected_read_packet(reader: &mut (impl PacketReader + Unpin + ?Sized)) -> std::io::Result<Self> {
+    pub async fn expected_read_packet(
+        reader: &mut (impl PacketReader + Unpin + ?Sized),
+    ) -> std::io::Result<Self> {
         let _ = reader.read_packet_header().await?;
         let mark = reader.read_u8().await?;
         assert_eq!(mark, 0xfe);

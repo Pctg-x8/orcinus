@@ -188,7 +188,8 @@ async fn main() {
             .expect("Failed to read resultset");
         match rs {
             orcinus::protos::Resultset41::Row(r) => {
-                println!("row: {r:?}");
+                // println!("row: {r:?}");
+                println!("row: {:?}", r.decompose_values().collect::<Vec<_>>());
             }
             orcinus::protos::Resultset41::Ok(ok) => {
                 println!(
@@ -208,7 +209,10 @@ async fn main() {
                 break;
             }
             orcinus::protos::Resultset41::EOF(eof) => {
-                println!("eof more_result={:?}", eof.status_flags.more_result_exists());
+                println!(
+                    "eof more_result={:?}",
+                    eof.status_flags.more_result_exists()
+                );
                 break;
             }
             orcinus::protos::Resultset41::Err(e) => {
