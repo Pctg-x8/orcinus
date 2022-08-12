@@ -10,3 +10,8 @@ impl StatusFlags {
         (self.0 & 0x4000) != 0
     }
 }
+impl std::fmt::Debug for StatusFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016b}", self.0)
+    }
+}

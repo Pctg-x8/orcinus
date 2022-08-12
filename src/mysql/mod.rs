@@ -1,10 +1,10 @@
-use std::task::Poll;
+use std::{pin::Pin, task::Poll};
 
 use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
-use tokio::io::{AsyncReadExt, Result as IOResult};
+use tokio::io::{AsyncRead, AsyncReadExt, Result as IOResult};
 
-mod authentication;
-mod protos;
+pub mod authentication;
+pub mod protos;
 
 fn decompose_packet_header(bytes: u32) -> self::protos::PacketHeader {
     self::protos::PacketHeader {
@@ -57,6 +57,45 @@ where
     }
 }
 
+pub struct ReadCounted<R> {
+    inner: R,
+    counter: std::sync::atomic::AtomicUsize,
+}
+impl<R> ReadCounted<R> {
+    pub const fn new(inner: R) -> Self {
+        Self {
+            inner,
+            counter: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn read_bytes(&self) -> usize {
+        self.counter.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+impl<R> AsyncRead for ReadCounted<R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        match unsafe { Pin::new_unchecked(&mut this.inner).poll_read(cx, buf) } {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+            std::task::Poll::Ready(Ok(())) => {
+                this.counter
+                    .fetch_add(buf.filled().len(), std::sync::atomic::Ordering::AcqRel);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
 pub trait PacketReader: AsyncReadExt {
     fn read_packet_header<'a>(&'a mut self) -> ReadPacketHeader<'a>
     where
@@ -77,3 +116,4 @@ pub trait PacketReader: AsyncReadExt {
         }
     }
 }
+impl<R> PacketReader for R where R: AsyncReadExt {}

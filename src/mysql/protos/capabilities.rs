@@ -28,6 +28,10 @@ impl CapabilityFlags {
     pub fn use_long_password(&self) -> bool {
         (self.0 & 0x0000_0001) != 0
     }
+    pub fn set_use_long_password(&mut self) -> &mut Self {
+        self.0 |= 0x0000_0001;
+        self
+    }
 
     pub fn send_found_rows_at_eof(&self) -> bool {
         (self.0 & 0x0000_0002) != 0
@@ -40,8 +44,12 @@ impl CapabilityFlags {
     pub fn support_connect_with_db(&self) -> bool {
         (self.0 & 0x0000_0008) != 0
     }
-    pub fn set_support_connect_with_db(&mut self) -> &mut Self {
+    pub fn set_connect_with_db(&mut self) -> &mut Self {
         self.0 |= 0x0000_0008;
+        self
+    }
+    pub fn clear_connect_with_db(&mut self) -> &mut Self {
+        self.0 &= !0x0000_0008;
         self
     }
 
@@ -72,16 +80,24 @@ impl CapabilityFlags {
     pub fn support_plugin_auth(&self) -> bool {
         (self.0 & 0x0008_0000) != 0
     }
-    pub fn set_support_plugin_auth(&mut self) -> &mut Self {
+    pub fn set_client_plugin_auth(&mut self) -> &mut Self {
         self.0 |= 0x0008_0000;
+        self
+    }
+    pub fn clear_plugin_auth(&mut self) -> &mut Self {
+        self.0 &= !0x0008_0000;
         self
     }
 
     pub fn support_connect_attrs(&self) -> bool {
         (self.0 & 0x0010_0000) != 0
     }
-    pub fn set_support_connect_attrs(&mut self) -> &mut Self {
+    pub fn set_client_connect_attrs(&mut self) -> &mut Self {
         self.0 |= 0x0010_0000;
+        self
+    }
+    pub fn clear_client_connect_attrs(&mut self) -> &mut Self {
+        self.0 &= !0x0010_0000;
         self
     }
 
@@ -95,5 +111,24 @@ impl CapabilityFlags {
 
     pub fn support_session_track(&self) -> bool {
         (self.0 & 0x0080_0000) != 0
+    }
+}
+impl std::fmt::Debug for CapabilityFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:032b}", self.0)
+    }
+}
+impl std::ops::BitAnd for CapabilityFlags {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+impl std::ops::BitOr for CapabilityFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
     }
 }

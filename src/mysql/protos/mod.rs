@@ -1,14 +1,13 @@
-use std::io::{SeekFrom, Write};
+use std::io::Write;
 
-use futures_util::{
-    future::{BoxFuture, LocalBoxFuture},
-    pin_mut, FutureExt,
-};
-use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use futures_util::{future::LocalBoxFuture, FutureExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use self::{capabilities::CapabilityFlags, status::StatusFlags};
+use crate::ReadCounted;
+
 use super::PacketReader;
 
+#[derive(Debug)]
 pub struct PacketHeader {
     pub payload_length: u32,
     pub sequence_id: u8,
@@ -147,6 +146,7 @@ impl LengthEncodedInteger {
     }
 }
 
+#[derive(Debug)]
 pub enum OKPacketCapabilityExtraData {
     Protocol41 {
         status_flags: StatusFlags,
@@ -156,6 +156,7 @@ pub enum OKPacketCapabilityExtraData {
         status_flags: StatusFlags,
     },
 }
+#[derive(Debug)]
 pub struct OKPacket {
     pub affected_rows: u64,
     pub last_insert_id: u64,
@@ -164,13 +165,30 @@ pub struct OKPacket {
     pub session_state_changes: Option<String>,
 }
 impl OKPacket {
-    pub async fn read(
-        payload_size: usize,
-        reader: &mut (impl super::PacketReader + Unpin + AsyncSeekExt),
+    pub async fn expected_read(
+        reader: &mut (impl super::PacketReader + Unpin),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let current_pos = reader.seek(SeekFrom::Current(0)).await?;
+        let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
+        let header = reader.read_u8().await?;
+        if header != 0 {
+            panic!("unexpected response packet header: 0x{header:02x}");
+        }
 
+        Self::read(
+            packet_header.payload_length as _,
+            &mut reader,
+            client_capability,
+        )
+        .await
+    }
+
+    pub async fn read(
+        payload_size: usize,
+        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
         let LengthEncodedInteger(affected_rows) = LengthEncodedInteger::read(reader).await?;
         let LengthEncodedInteger(last_insert_id) = LengthEncodedInteger::read(reader).await?;
         let capability_extra = if client_capability.support_41_protocol() {
@@ -217,8 +235,7 @@ impl OKPacket {
                 )
             }
         } else {
-            let rest_length =
-                payload_size as u64 - (reader.seek(SeekFrom::Current(0)).await? - current_pos);
+            let rest_length = payload_size - reader.read_bytes();
             let mut info_bytes = Vec::with_capacity(rest_length as _);
             unsafe {
                 info_bytes.set_len(rest_length as _);
@@ -238,6 +255,7 @@ impl OKPacket {
     }
 }
 
+#[derive(Debug)]
 pub struct ErrPacket {
     pub code: u16,
     pub sql_state: Option<[u8; 5]>,
@@ -246,21 +264,20 @@ pub struct ErrPacket {
 impl ErrPacket {
     pub async fn read(
         payload_size: usize,
-        reader: &mut (impl super::PacketReader + Unpin + AsyncSeekExt),
+        reader: &mut ReadCounted<impl super::PacketReader + Unpin>,
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let current_pos = reader.seek(SeekFrom::Current(0)).await?;
         let code = reader.read_u16_le().await?;
         let sql_state = if client_capabilities.support_41_protocol() {
-            reader.seek(SeekFrom::Current(1)).await?;
+            let mut _state_marker = [0u8; 1];
+            reader.read_exact(&mut _state_marker).await?;
             let mut sql_state = [0u8; 5];
             reader.read_exact(&mut sql_state).await?;
             Some(sql_state)
         } else {
             None
         };
-        let error_message_len =
-            payload_size - (reader.seek(SeekFrom::Current(0)).await? - current_pos) as usize;
+        let error_message_len = payload_size - reader.read_bytes();
         let mut em_bytes = Vec::with_capacity(error_message_len);
         unsafe {
             em_bytes.set_len(error_message_len);
@@ -275,6 +292,7 @@ impl ErrPacket {
     }
 }
 
+#[derive(Debug)]
 pub struct EOFPacket41 {
     pub warnings: u16,
     pub status_flags: StatusFlags,
@@ -293,6 +311,15 @@ pub enum OKOrEOFPacket {
     EOF41(EOFPacket41),
     EOF,
 }
+impl OKOrEOFPacket {
+    pub fn ok(self) -> Option<OKPacket> {
+        match self {
+            Self::OK(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+#[derive(Debug)]
 pub enum GenericResultPacket {
     OK(OKPacket),
     Err(ErrPacket),
@@ -301,23 +328,32 @@ pub enum GenericResultPacket {
 }
 impl GenericResultPacket {
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + AsyncSeekExt),
+        reader: &mut (impl PacketReader + Unpin),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
 
         let header = reader.read_u8().await?;
         match header {
-            0x00 => OKPacket::read(packet_header.payload_length as _, reader, client_capability)
-                .await
-                .map(Self::OK),
+            0x00 => OKPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .await
+            .map(Self::OK),
             0xfe if client_capability.support_41_protocol() => {
-                EOFPacket41::read(reader).await.map(Self::EOF41)
+                EOFPacket41::read(&mut reader).await.map(Self::EOF41)
             }
             0xfe => Ok(Self::EOF),
-            0xff => ErrPacket::read(packet_header.payload_length as _, reader, client_capability)
-                .await
-                .map(Self::Err),
+            0xff => ErrPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .await
+            .map(Self::Err),
             _ => unreachable!("invalid generic response type"),
         }
     }
@@ -333,6 +369,10 @@ impl GenericResultPacket {
 }
 
 mod capabilities;
+pub use self::capabilities::*;
 mod handshake;
+pub use self::handshake::*;
 mod status;
+pub use self::status::*;
 mod text;
+pub use self::text::*;
