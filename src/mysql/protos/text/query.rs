@@ -1,7 +1,10 @@
 use tokio::io::AsyncReadExt;
 
 use crate::{
-    protos::{CapabilityFlags, ClientPacket, ErrPacket, OKPacket, LengthEncodedInteger},
+    protos::{
+        read_lenenc_str, CapabilityFlags, ClientPacket, EOFPacket41, ErrPacket,
+        LengthEncodedInteger, OKPacket,
+    },
     PacketReader, ReadCounted,
 };
 
@@ -21,7 +24,7 @@ pub enum QueryCommandResponse {
     Ok(OKPacket),
     Err(ErrPacket),
     LocalInfileRequest { filename: String },
-    ResultSet { column_count: u64 },
+    Resultset { column_count: u64 },
 }
 impl QueryCommandResponse {
     pub async fn read_packet(
@@ -57,10 +60,140 @@ impl QueryCommandResponse {
                 Ok(Self::LocalInfileRequest {
                     filename: unsafe { String::from_utf8_unchecked(fn_bytes) },
                 })
-            },
+            }
             _ => {
-                let LengthEncodedInteger(column_count) = LengthEncodedInteger::read_ahead(head_value, &mut reader).await?;
-                Ok(Self::ResultSet { column_count })
+                let LengthEncodedInteger(column_count) =
+                    LengthEncodedInteger::read_ahead(head_value, &mut reader).await?;
+                Ok(Self::Resultset { column_count })
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ColumnDefinition41 {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub org_table: String,
+    pub name: String,
+    pub org_name: String,
+    pub character_set: u16,
+    pub column_length: u32,
+    pub r#type: u8,
+    pub flags: u16,
+    pub decimals: u8,
+    pub default_values: Option<String>,
+}
+impl ColumnDefinition41 {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin + ?Sized),
+    ) -> std::io::Result<Self> {
+        let _ = reader.read_packet_header().await?;
+
+        let catalog = read_lenenc_str(reader).await?;
+        let schema = read_lenenc_str(reader).await?;
+        let table = read_lenenc_str(reader).await?;
+        let org_table = read_lenenc_str(reader).await?;
+        let name = read_lenenc_str(reader).await?;
+        let org_name = read_lenenc_str(reader).await?;
+        let LengthEncodedInteger(fixed_length_fields_len) =
+            LengthEncodedInteger::read(reader).await?;
+        assert_eq!(fixed_length_fields_len, 0x0c);
+        let character_set = reader.read_u16_le().await?;
+        let column_length = reader.read_u32_le().await?;
+        let r#type = reader.read_u8().await?;
+        let flags = reader.read_u16_le().await?;
+        let decimals = reader.read_u8().await?;
+        let mut _filler = [0u8; 2];
+        reader.read_exact(&mut _filler).await?;
+
+        Ok(Self {
+            catalog,
+            schema,
+            table,
+            org_table,
+            name,
+            org_name,
+            character_set,
+            column_length,
+            r#type,
+            flags,
+            decimals,
+            default_values: None,
+        })
+    }
+
+    pub async fn read_packet_for_field_list(
+        reader: &mut (impl PacketReader + Unpin + ?Sized),
+    ) -> std::io::Result<Self> {
+        let org = Self::read_packet(reader).await?;
+        let default_values = read_lenenc_str(reader).await?;
+
+        Ok(Self {
+            default_values: Some(default_values),
+            ..org
+        })
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct ResultsetRow(Vec<u8>);
+impl ResultsetRow {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin + ?Sized),
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+        let mut packet_content = Vec::with_capacity(packet_header.payload_length as _);
+        unsafe {
+            packet_content.set_len(packet_header.payload_length as _);
+        }
+        reader.read_exact(&mut packet_content).await?;
+
+        Ok(Self(packet_content))
+    }
+}
+
+pub enum Resultset41 {
+    Row(ResultsetRow),
+    Err(ErrPacket),
+    Ok(OKPacket),
+    EOF(EOFPacket41),
+}
+impl Resultset41 {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        client_capabilities: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
+        let r1 = reader.read_u8().await?;
+
+        match r1 {
+            0x00 => OKPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capabilities,
+            )
+            .await
+            .map(Self::Ok),
+            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
+            0xff => ErrPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capabilities,
+            )
+            .await
+            .map(Self::Err),
+            _ => {
+                let mut contents = Vec::with_capacity(packet_header.payload_length as _);
+                unsafe {
+                    contents.set_len(packet_header.payload_length as _);
+                }
+                contents[0] = r1;
+                reader.read_exact(&mut contents[1..]).await?;
+                Ok(Self::Row(ResultsetRow(contents)))
             }
         }
     }

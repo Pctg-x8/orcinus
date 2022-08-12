@@ -68,7 +68,8 @@ async fn main() {
             required_caps
                 .set_support_41_protocol()
                 .set_support_secure_connection()
-                .set_use_long_password();
+                .set_use_long_password()
+                .set_support_deprecate_eof();
 
             sequence_id += 1;
             if p.short.capability_flags.support_41_protocol() {
@@ -163,6 +164,58 @@ async fn main() {
             .await
             .expect("Failed to read query command result");
     println!("result: {qc_result:?}");
+    let field_count = match qc_result {
+        orcinus::protos::QueryCommandResponse::Resultset { column_count } => column_count,
+        _ => unreachable!("unexpected command response"),
+    };
+    let mut columns = Vec::with_capacity(field_count as _);
+    for _ in 0..field_count {
+        columns.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read column def"),
+        );
+    }
+    println!("columns: {columns:#?}");
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read eof packet of columns");
+    }
+    loop {
+        let rs = orcinus::protos::Resultset41::read_packet(&mut stream, client_capability)
+            .await
+            .expect("Failed to read resultset");
+        match rs {
+            orcinus::protos::Resultset41::Row(r) => {
+                println!("row: {r:?}");
+            }
+            orcinus::protos::Resultset41::Ok(ok) => {
+                println!(
+                    "ok more_result={:?}",
+                    match ok.capability_extra {
+                        Some(orcinus::protos::OKPacketCapabilityExtraData::Protocol41 {
+                            status_flags,
+                            ..
+                        }) => status_flags,
+                        Some(orcinus::protos::OKPacketCapabilityExtraData::Transactions {
+                            status_flags,
+                        }) => status_flags,
+                        None => orcinus::protos::StatusFlags::new(),
+                    }
+                    .more_result_exists()
+                );
+                break;
+            }
+            orcinus::protos::Resultset41::EOF(eof) => {
+                println!("eof more_result={:?}", eof.status_flags.more_result_exists());
+                break;
+            }
+            orcinus::protos::Resultset41::Err(e) => {
+                panic!("Resultset Errored {e:?}");
+            }
+        }
+    }
 
     orcinus::protos::QuitCommand
         .write_packet(&mut stream, 0)

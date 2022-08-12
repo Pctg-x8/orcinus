@@ -6,6 +6,10 @@ impl StatusFlags {
         Self(0)
     }
 
+    pub fn more_result_exists(&self) -> bool {
+        (self.0 & 0x0008) != 0
+    }
+
     pub fn has_state_changed(&self) -> bool {
         (self.0 & 0x4000) != 0
     }

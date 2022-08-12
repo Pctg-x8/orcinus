@@ -112,6 +112,14 @@ impl CapabilityFlags {
     pub fn support_session_track(&self) -> bool {
         (self.0 & 0x0080_0000) != 0
     }
+
+    pub fn support_deprecate_eof(&self) -> bool {
+        (self.0 & 0x0100_0000) != 0
+    }
+    pub fn set_support_deprecate_eof(&mut self) -> &mut Self {
+        self.0 |= 0x0100_0000;
+        self
+    }
 }
 impl std::fmt::Debug for CapabilityFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

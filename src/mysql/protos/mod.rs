@@ -71,14 +71,14 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
         let first_byte = reader.read_u8().await?;
         Self::read_ahead(first_byte, reader).await
     }
 
     pub async fn read_ahead(
         first_byte: u8,
-        reader: &mut (impl AsyncReadExt + Unpin),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
@@ -150,6 +150,18 @@ impl LengthEncodedInteger {
                 .await
         }
     }
+}
+
+pub async fn read_lenenc_str(
+    reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+) -> std::io::Result<String> {
+    let LengthEncodedInteger(len) = LengthEncodedInteger::read(reader).await?;
+    let mut buf = Vec::with_capacity(len as _);
+    unsafe {
+        buf.set_len(len as _);
+    }
+    reader.read_exact(&mut buf).await?;
+    Ok(unsafe { String::from_utf8_unchecked(buf) })
 }
 
 #[derive(Debug)]
@@ -304,7 +316,14 @@ pub struct EOFPacket41 {
     pub status_flags: StatusFlags,
 }
 impl EOFPacket41 {
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+    pub async fn expected_read_packet(reader: &mut (impl PacketReader + Unpin + ?Sized)) -> std::io::Result<Self> {
+        let _ = reader.read_packet_header().await?;
+        let mark = reader.read_u8().await?;
+        assert_eq!(mark, 0xfe);
+        Self::read(reader).await
+    }
+
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
         Ok(Self {
             warnings: reader.read_u16_le().await?,
             status_flags: StatusFlags(reader.read_u16_le().await?),
