@@ -13,108 +13,108 @@ async fn main() {
         .expect("Failed to read initial handshake");
     println!("sequence id: {sequence_id}");
     println!("server_handshake: {server_handshake:?}");
-    let client_capability;
-    match server_handshake {
-        orcinus::protos::Handshake::V10Long(ref p) => {
-            let auth_response = match p.auth_plugin_name {
-                Some(ref x) if x == orcinus::authentication::Native41::NAME => {
-                    orcinus::authentication::Native41 {
-                        server_data_1: &p.short.auth_plugin_data_part_1,
-                        server_data_2: p
-                            .auth_plugin_data_part_2
-                            .as_deref()
-                            .expect("no extra data passed from server"),
-                    }
-                    .generate("")
-                }
-                Some(ref x) if x == orcinus::authentication::ClearText::NAME => {
-                    orcinus::authentication::ClearText.generate("")
-                }
-                Some(ref x) if x == orcinus::authentication::SHA256::NAME => {
-                    let a = orcinus::authentication::SHA256 {
-                        server_spki_der: None,
-                        scramble_buffer_1: &p.short.auth_plugin_data_part_1,
-                        scramble_buffer_2: p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
-                    };
-                    a.generate("root")
-                }
-                Some(ref x) if x == orcinus::authentication::CachedSHA256::NAME => {
-                    let a =
-                        orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
-                            server_spki_der: None,
-                            scramble_buffer_1: &p.short.auth_plugin_data_part_1,
-                            scramble_buffer_2: p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
-                        });
-                    a.generate("root")
-                }
-                Some(ref x) => unreachable!("unknown auth plugin: {x}"),
-                None => unreachable!("auth plugin is not specified"),
-            };
-            let mut required_caps = orcinus::protos::CapabilityFlags::new();
-            required_caps
-                .set_support_41_protocol()
-                .set_support_secure_connection()
-                .set_use_long_password()
-                .set_support_deprecate_eof();
 
-            sequence_id += 1;
-            if p.short.capability_flags.support_41_protocol() {
-                let resp = orcinus::protos::HandshakeResponse41 {
-                    capability: p.short.capability_flags & required_caps,
-                    max_packet_size: 16777215,
-                    character_set: p.character_set,
-                    username: "root",
-                    auth_response: if p
-                        .short
-                        .capability_flags
-                        .support_plugin_auth_lenenc_client_data()
-                    {
-                        orcinus::protos::HandshakeResponse41AuthResponse::PluginAuthLenEnc(
-                            &auth_response,
-                        )
-                    } else if p.short.capability_flags.support_secure_connection() {
-                        orcinus::protos::HandshakeResponse41AuthResponse::SecureConnection(
-                            &auth_response,
-                        )
-                    } else {
-                        orcinus::protos::HandshakeResponse41AuthResponse::Plain(&auth_response)
-                    },
-                    database: Some("sandstar"),
-                    auth_plugin_name: p.auth_plugin_name.as_deref(),
-                    connect_attrs: Default::default(),
-                };
-                client_capability = resp.compute_final_capability_flags();
+    let server_caps = match server_handshake {
+        orcinus::protos::Handshake::V10Long(ref p) => p.short.capability_flags,
+        orcinus::protos::Handshake::V10Short(ref p) => p.capability_flags,
+        _ => orcinus::protos::CapabilityFlags::new(),
+    };
+    let mut required_caps = orcinus::protos::CapabilityFlags::new();
+    required_caps
+        .set_support_41_protocol()
+        .set_support_secure_connection()
+        .set_use_long_password()
+        .set_support_deprecate_eof()
+        .set_connect_with_db()
+        .set_client_plugin_auth()
+        .set_support_plugin_auth_lenenc_client_data();
+    let capability = required_caps & server_caps;
 
-                resp.write_packet(&mut stream, sequence_id)
-                    .await
-                    .expect("Failed to send 41 handshake response");
-            } else {
-                let resp = orcinus::protos::HandshakeResponse320 {
-                    capability: p.short.capability_flags & required_caps,
-                    max_packet_size: 10,
-                    username: "root",
-                    auth_response: &auth_response,
-                    database: Some("sandstar"),
-                };
-                client_capability = resp.compute_final_capability_flags();
-
-                resp.write_packet(&mut stream, sequence_id)
-                    .await
-                    .expect("Failed to send old handshake response")
+    let (auth_plugin_name, auth_data_1, auth_data_2) = match server_handshake {
+        orcinus::protos::Handshake::V10Long(ref p) => (
+            p.auth_plugin_name.as_deref(),
+            &p.short.auth_plugin_data_part_1[..],
+            p.auth_plugin_data_part_2.as_deref(),
+        ),
+        orcinus::protos::Handshake::V10Short(ref p) => (None, &p.auth_plugin_data_part_1[..], None),
+        orcinus::protos::Handshake::V9(ref p) => (None, p.scramble.as_bytes(), None),
+    };
+    let auth_response = match auth_plugin_name {
+        Some(x) if x == orcinus::authentication::Native41::NAME => {
+            orcinus::authentication::Native41 {
+                server_data_1: auth_data_1,
+                server_data_2: auth_data_2.expect("no extra data passed from server"),
             }
+            .generate("")
         }
-        _ => unreachable!("this handshake request cannot be processed"),
+        Some(x) if x == orcinus::authentication::ClearText::NAME => {
+            orcinus::authentication::ClearText.generate("")
+        }
+        Some(x) if x == orcinus::authentication::SHA256::NAME => {
+            let a = orcinus::authentication::SHA256 {
+                server_spki_der: None,
+                scramble_buffer_1: auth_data_1,
+                scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+            };
+            a.generate("root")
+        }
+        Some(x) if x == orcinus::authentication::CachedSHA256::NAME => {
+            let a = orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
+                server_spki_der: None,
+                scramble_buffer_1: auth_data_1,
+                scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+            });
+            a.generate("root")
+        }
+        Some(x) => unreachable!("unknown auth plugin: {x}"),
+        None => unreachable!("auth plugin is not specified"),
+    };
+
+    sequence_id += 1;
+    if capability.support_41_protocol() {
+        let resp = orcinus::protos::HandshakeResponse41 {
+            capability,
+            max_packet_size: 16777215,
+            character_set: 0xff,
+            username: "root",
+            auth_response: if capability.support_plugin_auth_lenenc_client_data() {
+                orcinus::protos::HandshakeResponse41AuthResponse::PluginAuthLenEnc(&auth_response)
+            } else if capability.support_secure_connection() {
+                orcinus::protos::HandshakeResponse41AuthResponse::SecureConnection(&auth_response)
+            } else {
+                orcinus::protos::HandshakeResponse41AuthResponse::Plain(&auth_response)
+            },
+            database: Some("sandstar"),
+            auth_plugin_name,
+            connect_attrs: Default::default(),
+        };
+
+        resp.write_packet(&mut stream, sequence_id)
+            .await
+            .expect("Failed to send 41 handshake response");
+    } else {
+        let resp = orcinus::protos::HandshakeResponse320 {
+            capability,
+            max_packet_size: 16777216,
+            username: "root",
+            auth_response: &auth_response,
+            database: Some("sandstar"),
+        };
+
+        resp.write_packet(&mut stream, sequence_id)
+            .await
+            .expect("Failed to send old handshake response")
     }
     stream.flush().await.expect("Failed to flush buffer");
 
-    let resp = orcinus::protos::HandshakeResult::read_packet(&mut stream, client_capability)
+    let resp = orcinus::protos::HandshakeResult::read_packet(&mut stream, capability)
         .await
         .expect("Failed to read handshake result")
         .into_result()
         .expect("Failed to handshake");
     println!("connection: {resp:?}");
 
-    let mut client = orcinus::Client::new(stream, client_capability);
+    let mut client = orcinus::Client::new(stream, capability);
     {
         let mut row_stream = client
             .fetch_all("Select * from friends")
