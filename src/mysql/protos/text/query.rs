@@ -2,8 +2,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     protos::{
-        read_lenenc_str, CapabilityFlags, ClientPacket, EOFPacket41, ErrPacket,
-        LengthEncodedInteger, OKPacket,
+        read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
+        InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
     },
     PacketReader, ReadCounted,
 };
@@ -80,7 +80,7 @@ pub struct ColumnDefinition41 {
     pub org_name: String,
     pub character_set: u16,
     pub column_length: u32,
-    pub r#type: u8,
+    pub type_byte: u8,
     pub flags: u16,
     pub decimals: u8,
     pub default_values: Option<String>,
@@ -102,7 +102,7 @@ impl ColumnDefinition41 {
         assert_eq!(fixed_length_fields_len, 0x0c);
         let character_set = reader.read_u16_le().await?;
         let column_length = reader.read_u32_le().await?;
-        let r#type = reader.read_u8().await?;
+        let type_byte = reader.read_u8().await?;
         let flags = reader.read_u16_le().await?;
         let decimals = reader.read_u8().await?;
         let mut _filler = [0u8; 2];
@@ -117,7 +117,7 @@ impl ColumnDefinition41 {
             org_name,
             character_set,
             column_length,
-            r#type,
+            type_byte,
             flags,
             decimals,
             default_values: None,
@@ -134,6 +134,16 @@ impl ColumnDefinition41 {
             default_values: Some(default_values),
             ..org
         })
+    }
+
+    #[inline]
+    pub fn r#type(&self) -> Result<ColumnType, InvalidColumnTypeError> {
+        self.type_byte.try_into()
+    }
+
+    #[inline]
+    pub unsafe fn type_unchecked(&self) -> ColumnType {
+        ColumnType::from_u8_unchecked(self.type_byte)
     }
 }
 

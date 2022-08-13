@@ -1,10 +1,14 @@
 //! Binary Protocol
 
+use std::io::Read;
+
 use tokio::io::AsyncReadExt;
 
 use crate::{PacketReader, ReadCounted};
 
-use super::{CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket};
+use super::{
+    CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket, Value,
+};
 
 #[repr(transparent)]
 pub struct ByteString<'s>(pub &'s [u8]);
@@ -19,6 +23,18 @@ impl ByteString<'_> {
         sink.extend(self.0);
     }
 }
+impl<'s> ByteString<'s> {
+    pub fn slice_from(reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
+        let LengthEncodedInteger(len) = LengthEncodedInteger::read_sync(reader)?;
+        let s = &reader.get_ref()[reader.position() as usize..(reader.position() + len) as usize];
+        reader.set_position(reader.position() + len);
+        Ok(Self(s))
+    }
+
+    pub unsafe fn as_str_unchecked(&self) -> &'s str {
+        std::str::from_utf8_unchecked(self.0)
+    }
+}
 
 #[repr(transparent)]
 pub struct LongLong(pub u64);
@@ -26,6 +42,12 @@ impl LongLong {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.reserve(8);
         sink.extend(self.0.to_le_bytes());
+    }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 8];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(u64::from_le_bytes(bs)))
     }
 }
 
@@ -36,6 +58,12 @@ impl Int {
         sink.reserve(4);
         sink.extend(self.0.to_le_bytes());
     }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 4];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(u32::from_le_bytes(bs)))
+    }
 }
 
 #[repr(transparent)]
@@ -45,6 +73,12 @@ impl Short {
         sink.reserve(2);
         sink.extend(self.0.to_le_bytes());
     }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 2];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(u16::from_le_bytes(bs)))
+    }
 }
 
 #[repr(transparent)]
@@ -52,6 +86,12 @@ pub struct Tiny(pub u8);
 impl Tiny {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.push(self.0);
+    }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 1];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(bs[0]))
     }
 }
 
@@ -62,6 +102,12 @@ impl Double {
         sink.reserve(8);
         sink.extend(self.0.to_le_bytes());
     }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 8];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(f64::from_le_bytes(bs)))
+    }
 }
 
 #[repr(transparent)]
@@ -71,34 +117,16 @@ impl Float {
         sink.reserve(4);
         sink.extend(self.0.to_le_bytes());
     }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let mut bs = [0u8; 4];
+        reader.read_exact(&mut bs)?;
+        Ok(Self(f32::from_le_bytes(bs)))
+    }
 }
 
 // TODO: date time formats
 
-pub enum BinaryProtocolValue<'s> {
-    String(&'s str),
-    Varchar(&'s str),
-    VarString(&'s str),
-    Enum(&'s str),
-    Set(&'s str),
-    LongBlob(&'s [u8]),
-    MediumBlob(&'s [u8]),
-    Blob(&'s [u8]),
-    TinyBlob(&'s [u8]),
-    Geometry(&'s [u8]),
-    Bit(&'s [u8]),
-    Decimal(&'s str),
-    NewDecimal(&'s str),
-    LongLong(u64),
-    Long(u32),
-    Int24(u32),
-    Short(u16),
-    Year(u16),
-    Tiny(u8),
-    Double(f64),
-    Float(f32),
-    Null,
-}
 pub trait BinaryProtocolValueDeconstructor {
     fn serialize_into(&self, sink: &mut Vec<u8>);
     fn column_type(&self) -> ColumnType;
@@ -125,7 +153,8 @@ where
         T::is_null(self)
     }
 }
-impl BinaryProtocolValueDeconstructor for BinaryProtocolValue<'_> {
+
+impl BinaryProtocolValueDeconstructor for Value<'_> {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         match self {
@@ -185,7 +214,7 @@ impl BinaryProtocolValueDeconstructor for BinaryProtocolValue<'_> {
         matches!(self, Self::Null)
     }
 }
-impl<A> BinaryProtocolValueDeconstructor for (BinaryProtocolValue<'_>, A) {
+impl<A> BinaryProtocolValueDeconstructor for (Value<'_>, A) {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         self.0.serialize_into(sink)
@@ -260,7 +289,7 @@ pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValueDeconstructor], s
 }
 /// values: iterator of (value, unsigned_flag)
 pub fn serialize_value_types<'d>(
-    values: impl Iterator<Item = (&'d BinaryProtocolValue<'d>, bool)>,
+    values: impl Iterator<Item = (&'d Value<'d>, bool)>,
     sink: &mut Vec<u8>,
 ) {
     let (l, h) = values.size_hint();
@@ -289,7 +318,7 @@ impl BinaryResultsetRow {
         column_count: usize,
         reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
     ) -> std::io::Result<Self> {
-        let mut null_bitmap = Vec::with_capacity((column_count + 7) / 8);
+        let mut null_bitmap = Vec::with_capacity((column_count + 7 + 2) / 8);
         unsafe {
             null_bitmap.set_len((column_count + 7) / 8);
         }
@@ -305,6 +334,51 @@ impl BinaryResultsetRow {
             null_bitmap,
             values,
         })
+    }
+
+    #[inline]
+    pub fn decode_values<'r, 'cs>(
+        &'r self,
+        column_types: &'cs [ColumnType],
+    ) -> BinaryResultsetRowValues<'r, 'cs> {
+        BinaryResultsetRowValues {
+            null_bitmap: &self.null_bitmap,
+            values: std::io::Cursor::new(&self.values),
+            columns: column_types,
+            element_counter: 0,
+        }
+    }
+}
+
+pub struct BinaryResultsetRowValues<'r, 'cs> {
+    null_bitmap: &'r [u8],
+    values: std::io::Cursor<&'r [u8]>,
+    columns: &'cs [ColumnType],
+    element_counter: usize,
+}
+impl<'r> Iterator for BinaryResultsetRowValues<'r, '_> {
+    type Item = std::io::Result<Value<'r>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.element_counter == self.columns.len() {
+            return None;
+        }
+
+        let null_bit_position = self.element_counter + 2; // 謎に+2されてるぶん
+        let is_null_value =
+            (self.null_bitmap[null_bit_position / 8] & (0x01 << (null_bit_position % 8))) != 0;
+        let ty = if is_null_value {
+            ColumnType::Null
+        } else {
+            self.columns[self.element_counter]
+        };
+        match ty.slice_value(&mut self.values) {
+            Err(e) => Some(Err(e)),
+            Ok(v) => {
+                self.element_counter += 1;
+                Some(Ok(v))
+            }
+        }
     }
 }
 
@@ -352,7 +426,7 @@ impl BinaryResultset41 {
             )
             .await
             .map(Self::Row),
-            _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{r1:02x}")
+            _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{r1:02x}"),
         }
     }
 }

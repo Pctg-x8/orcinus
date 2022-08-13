@@ -3,8 +3,8 @@ use tokio::io::AsyncReadExt;
 use crate::{PacketReader, ReadCounted};
 
 use super::{
-    serialize_null_bitmap, serialize_value_types, serialize_values, BinaryProtocolValue,
-    CapabilityFlags, ErrPacket, LengthEncodedInteger, OKPacket,
+    serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
+    LengthEncodedInteger, OKPacket, Value,
 };
 
 pub struct StmtPrepareCommand<'s>(pub &'s str);
@@ -67,7 +67,7 @@ impl StmtExecuteFlags {
 pub struct StmtExecuteCommand<'p> {
     pub statement_id: u32,
     pub flags: StmtExecuteFlags,
-    pub parameters: &'p [(BinaryProtocolValue<'p>, bool)],
+    pub parameters: &'p [(Value<'p>, bool)],
     pub requires_rebound_parameters: bool,
 }
 impl super::ClientPacket for StmtExecuteCommand<'_> {
@@ -156,9 +156,6 @@ impl StmtPrepareResult {
         }
     }
 }
-
-#[derive(Debug)]
-pub struct BinaryResultsetRow {}
 
 #[derive(Debug)]
 pub enum StmtExecuteResult {

@@ -157,48 +157,126 @@ async fn main() {
         .expect("Failed to handshake");
     println!("connection: {resp:?}");
 
-    let mut client = orcinus::Client::new(stream, client_capability);
-    {
-        let mut row_stream = client
-            .fetch_all("Select * from friends")
+    orcinus::protos::QueryCommand("Select * from friends")
+        .write_packet(&mut stream, 0)
+        .await
+        .expect("Failed to send query command");
+    stream.flush().await.expect("Failed to flush buffer");
+    let qc_result =
+        orcinus::protos::QueryCommandResponse::read_packet(&mut stream, client_capability)
             .await
-            .expect("Failed to send query command");
-
-        while let Some(r) = row_stream
-            .try_next()
-            .await
-            .expect("Failed to read resultset")
-        {
-            println!("row: {:?}", r.decompose_values().collect::<Vec<_>>());
-        }
-
-        println!(
-            "enumeration end: more_result={:?}",
-            row_stream.has_more_resultset()
+            .expect("Failed to read query command result");
+    println!("result: {qc_result:?}");
+    let field_count = match qc_result {
+        orcinus::protos::QueryCommandResponse::Resultset { column_count } => column_count,
+        _ => unreachable!("unexpected command response"),
+    };
+    let mut columns = Vec::with_capacity(field_count as _);
+    for _ in 0..field_count {
+        columns.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read column def"),
         );
     }
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read eof packet of columns");
+    }
+    println!("columns: {columns:#?}");
 
-    let client = client.share();
-    let mut stmt = client
-        .prepare("Select * from friends where id=?")
+    loop {
+        let rc = orcinus::protos::Resultset41::read_packet(&mut stream, client_capability)
+            .await
+            .expect("Failed to read resultset entry");
+
+        match rc {
+            orcinus::protos::Resultset41::Row(r) => {
+                println!("row: {:?}", r.decompose_values().collect::<Vec<_>>());
+            }
+            orcinus::protos::Resultset41::Err(e) => {
+                println!("errored {}", e.error_message);
+                break;
+            }
+            orcinus::protos::Resultset41::Ok(o) => {
+                println!(
+                    "ok more_results={}",
+                    o.status_flags().unwrap_or_default().more_result_exists()
+                );
+                break;
+            }
+            orcinus::protos::Resultset41::EOF(e) => {
+                println!("eof more_results={}", e.status_flags.more_result_exists());
+                break;
+            }
+        }
+    }
+
+    orcinus::protos::StmtPrepareCommand("Select * from friends where id=?")
+        .write_packet(&mut stream, 0)
         .await
+        .expect("Failed to write prepare command");
+    stream.flush().await.expect("Failed to flush stream");
+    let resp = orcinus::protos::StmtPrepareResult::read_packet(&mut stream, client_capability)
+        .await
+        .expect("Failed to read prepare result packet")
+        .into_result()
         .expect("Failed to prepare stmt");
-    let exec_resp = stmt
-        .execute(&[(orcinus::protos::Value::Long(7), false)], true)
+    println!("stmt prepare: {resp:?}");
+    let mut params = Vec::with_capacity(resp.num_params as _);
+    for _ in 0..resp.num_params {
+        params.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read params packet"),
+        );
+    }
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read EOF packet");
+    }
+    let mut columns = Vec::with_capacity(resp.num_columns as _);
+    for _ in 0..resp.num_columns {
+        columns.push(
+            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+                .await
+                .expect("Failed to read params packet"),
+        );
+    }
+    if !client_capability.support_deprecate_eof() {
+        orcinus::protos::EOFPacket41::expected_read_packet(&mut stream)
+            .await
+            .expect("Failed to read EOF packet");
+    }
+    println!("params: {params:#?}");
+    println!("columns: {columns:#?}");
+
+    let parameters = [(orcinus::protos::Value::Long(7), false)];
+    orcinus::protos::StmtExecuteCommand {
+        statement_id: resp.statement_id,
+        flags: orcinus::protos::StmtExecuteFlags::new(),
+        parameters: &parameters,
+        requires_rebound_parameters: true,
+    }
+    .write_packet(&mut stream, 0)
+    .await
+    .expect("Failed to write execute packet");
+    stream.flush().await.expect("Failed to flush stream");
+    let exec_resp = orcinus::protos::StmtExecuteResult::read_packet(&mut stream, client_capability)
         .await
-        .expect("Faield to execute stmt");
+        .expect("Failed to read stmt execute result");
+    let column_count = match exec_resp {
+        orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
+        _ => unreachable!("unexpected select statement result"),
+    };
 
     {
-        let mut c = client.lock();
-
-        let column_count = match exec_resp {
-            orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
-            _ => unreachable!("unexpected select statement result"),
-        };
-        let mut resultset_stream = c
-            .binary_resultset_stream(column_count as _)
-            .await
-            .expect("Failed to load resultset heading columns");
+        let mut resultset_stream =
+            orcinus::BinaryResultsetStream::new(&mut stream, client_capability, column_count as _)
+                .await
+                .expect("Failed to load resultset heading columns");
         let column_types = unsafe {
             resultset_stream
                 .column_types_unchecked()
@@ -223,10 +301,19 @@ async fn main() {
         );
     }
 
-    stmt.close().await.expect("Failed to close stmt");
-    client
-        .unshare()
-        .quit()
+    orcinus::protos::StmtCloseCommand(resp.statement_id)
+        .write_packet(&mut stream, 0)
         .await
-        .expect("Failed to quit client");
+        .expect("Failed to write stmt close command");
+
+    orcinus::protos::QuitCommand
+        .write_packet(&mut stream, 0)
+        .await
+        .expect("Failed to send quit command");
+    stream.flush().await.expect("Failed to flush buffer");
+    stream
+        .into_inner()
+        .shutdown()
+        .await
+        .expect("Failed to shutdown the connection");
 }

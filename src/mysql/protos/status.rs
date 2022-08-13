@@ -19,3 +19,8 @@ impl std::fmt::Debug for StatusFlags {
         write!(f, "{:016b}", self.0)
     }
 }
+impl Default for StatusFlags {
+    fn default() -> Self {
+        Self::new()
+    }
+}
