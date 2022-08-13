@@ -10,7 +10,7 @@ readme = "README.md"
 license-file = "LICENSE"
 keywords = ["mysql"]
 categories = ["asynchronous", "database"]
-exclude = ["examples/"]
+exclude = ["examples/", ".vscode"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
