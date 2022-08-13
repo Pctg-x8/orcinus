@@ -89,7 +89,7 @@ async fn main() {
         character_set: 0xff,
         username: "root",
         password: "root",
-        database: Some("sandstar"),
+        database: Some("test"),
     };
 
     let (auth_plugin_name, auth_data_1, auth_data_2) = match server_handshake {
@@ -143,7 +143,7 @@ async fn main() {
     let mut client = unsafe { orcinus::Client::new(stream, capability) };
     {
         let mut row_stream = client
-            .fetch_all("Select * from friends")
+            .fetch_all("Select * from test_data")
             .await
             .expect("Failed to send query command");
 
@@ -163,7 +163,7 @@ async fn main() {
 
     let client = client.share();
     let mut stmt = client
-        .prepare("Select * from friends where id=?")
+        .prepare("Select * from test_data where id=?")
         .await
         .expect("Failed to prepare stmt");
     let exec_resp = stmt

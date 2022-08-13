@@ -7,14 +7,14 @@ async fn main() {
         .expect("Failed to connect");
     let stream = tokio::io::BufStream::new(stream);
 
-    let connect_info = orcinus::ConnectInfo::new("root", "root").database("sandstar");
+    let connect_info = orcinus::ConnectInfo::new("root", "root").database("test");
     let mut client = orcinus::Client::handshake(stream, &connect_info)
         .await
         .expect("Failed to connect to db server");
 
     {
         let mut row_stream = client
-            .fetch_all("Select * from friends")
+            .fetch_all("Select * from test_data")
             .await
             .expect("Failed to send query command");
 
@@ -34,7 +34,7 @@ async fn main() {
 
     let client = client.share();
     let mut stmt = client
-        .prepare("Select * from friends where id=?")
+        .prepare("Select * from test_data where id=?")
         .await
         .expect("Failed to prepare stmt");
     let exec_resp = stmt

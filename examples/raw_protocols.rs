@@ -54,7 +54,7 @@ async fn main() {
                     character_set: 0xff,
                     username: "root",
                     auth_response: &auth_response,
-                    database: Some("sandstar"),
+                    database: Some("test"),
                     auth_plugin_name,
                     connect_attrs: Default::default(),
                 }
@@ -67,7 +67,7 @@ async fn main() {
                     max_packet_size: 16777216,
                     username: "root",
                     auth_response: &auth_response,
-                    database: Some("sandstar"),
+                    database: Some("test"),
                 }
                 .write_packet(&mut stream, sequence_id + 1)
                 .await
@@ -89,7 +89,7 @@ async fn main() {
                     character_set: 0xff,
                     username: "root",
                     auth_response: b"root",
-                    database: Some("sandstar"),
+                    database: Some("test"),
                     auth_plugin_name,
                     connect_attrs: Default::default(),
                 }
@@ -102,7 +102,7 @@ async fn main() {
                     max_packet_size: 16777216,
                     username: "root",
                     auth_response: b"root",
-                    database: Some("sandstar"),
+                    database: Some("test"),
                 }
                 .write_packet(&mut stream, sequence_id + 1)
                 .await
@@ -131,7 +131,7 @@ async fn main() {
                     character_set: 0xff,
                     username: "root",
                     auth_response: &auth_response,
-                    database: Some("sandstar"),
+                    database: Some("test"),
                     auth_plugin_name,
                     connect_attrs: Default::default(),
                 }
@@ -144,7 +144,7 @@ async fn main() {
                     max_packet_size: 16777216,
                     username: "root",
                     auth_response: &auth_response,
-                    database: Some("sandstar"),
+                    database: Some("test"),
                 }
                 .write_packet(&mut stream, sequence_id + 1)
                 .await
@@ -171,7 +171,7 @@ async fn main() {
     };
     println!("connection: {resp:?}");
 
-    orcinus::protos::QueryCommand("Select * from friends")
+    orcinus::protos::QueryCommand("Select * from test_data")
         .write_packet(&mut stream, 0)
         .await
         .expect("Failed to send query command");
@@ -226,7 +226,7 @@ async fn main() {
         }
     }
 
-    orcinus::protos::StmtPrepareCommand("Select * from friends where id=?")
+    orcinus::protos::StmtPrepareCommand("Select * from test_data where id=?")
         .write_packet(&mut stream, 0)
         .await
         .expect("Failed to write prepare command");
