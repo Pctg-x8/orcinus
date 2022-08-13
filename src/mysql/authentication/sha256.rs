@@ -1,5 +1,8 @@
+use rsa::{pkcs8::DecodePublicKey, PaddingScheme, PublicKey, RsaPublicKey};
+use sha2::Sha256;
+
 pub struct SHA256<'k> {
-    pub server_public_keyfile: Option<&'k [u8]>,
+    pub server_spki_der: Option<&'k [u8]>,
     pub scramble_buffer_1: &'k [u8],
     pub scramble_buffer_2: &'k [u8],
 }
@@ -11,29 +14,44 @@ impl super::Authentication for SHA256<'_> {
             return Vec::new();
         }
 
-        match self.server_public_keyfile {
-            // public key retrieval is needed
-            None => vec![0x01],
+        match self.server_spki_der {
+            // fast path
+            None => {
+                let hashed_password =
+                    ring::digest::digest(&ring::digest::SHA256, password.as_bytes());
+                let xor_target = ring::digest::digest(
+                    &ring::digest::SHA256,
+                    &ring::digest::digest(&ring::digest::SHA256, hashed_password.as_ref())
+                        .as_ref()
+                        .iter()
+                        .chain(self.scramble_buffer_1.iter())
+                        .chain(self.scramble_buffer_2[..self.scramble_buffer_2.len() - 1].iter())
+                        .copied()
+                        .collect::<Vec<_>>(),
+                );
+
+                hashed_password
+                    .as_ref()
+                    .iter()
+                    .zip(xor_target.as_ref().iter())
+                    .map(|(&a, &b)| a ^ b)
+                    .collect()
+            }
             Some(k) => {
                 let scrambled_password = password
                     .bytes()
                     .zip(
                         self.scramble_buffer_1
                             .iter()
-                            .chain(self.scramble_buffer_2.iter()),
+                            .chain(self.scramble_buffer_2.iter())
+                            .cycle(),
                     )
                     .map(|(a, b)| a ^ b)
                     .collect::<Vec<_>>();
-                let key = ring::signature::RsaKeyPair::from_pkcs8(k).expect("invalid keyfile");
-                let mut signature = vec![0u8; key.public_modulus_len()];
-                key.sign(
-                    &ring::signature::RSA_PKCS1_SHA256,
-                    &ring::rand::SystemRandom::new(),
-                    &scrambled_password,
-                    &mut signature,
-                )
-                .expect("Failed to sign password");
-                signature
+                let key = RsaPublicKey::from_public_key_der(k).expect("invalid spki format");
+                let padding = PaddingScheme::new_oaep::<Sha256>();
+                key.encrypt(&mut rand::thread_rng(), padding, &scrambled_password)
+                    .expect("Failed to encrypt password")
             }
         }
     }

@@ -291,20 +291,68 @@ impl super::ClientPacket for SSLRequest {
     }
 }
 
+pub struct PublicKeyRequest;
+impl super::ClientPacket for PublicKeyRequest {
+    fn serialize_payload(&self) -> Vec<u8> {
+        vec![0x02]
+    }
+}
+
 #[repr(transparent)]
 pub struct AuthMoreData(pub Vec<u8>);
 impl AuthMoreData {
-    pub async fn read_packet(reader: &mut (impl PacketReader + Unpin)) -> std::io::Result<Self> {
+    pub async fn expacted_read_packet(
+        reader: &mut (impl PacketReader + Unpin),
+    ) -> std::io::Result<Self> {
         let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
         let heading = reader.read_u8().await?;
         assert_eq!(heading, 0x01);
 
-        let mut content = Vec::with_capacity(packet_header.payload_length as usize - 1);
+        Self::read(packet_header.payload_length as _, &mut reader).await
+    }
+
+    pub async fn read(
+        payload_length: usize,
+        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+    ) -> std::io::Result<Self> {
+        let mut content = Vec::with_capacity(payload_length - reader.read_bytes());
         unsafe {
-            content.set_len(packet_header.payload_length as usize - 1);
+            content.set_len(payload_length - reader.read_bytes());
         }
         reader.read_exact(&mut content).await?;
         Ok(Self(content))
+    }
+}
+
+pub struct AuthMoreDataResponse(Result<AuthMoreData, ErrPacket>);
+impl AuthMoreDataResponse {
+    pub async fn read_packet(
+        reader: &mut (impl PacketReader + Unpin),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = reader.read_packet_header().await?;
+        let mut reader = ReadCounted::new(reader);
+        let heading = reader.read_u8().await?;
+
+        match heading {
+            0xff => ErrPacket::read(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .await
+            .map(|e| Self(Err(e))),
+            0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
+                .await
+                .map(|x| Self(Ok(x))),
+            _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
+        }
+    }
+
+    #[inline]
+    pub fn into_result(self) -> Result<AuthMoreData, ErrPacket> {
+        self.0
     }
 }
 

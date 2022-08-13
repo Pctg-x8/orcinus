@@ -87,7 +87,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
 
     pub async fn fetch_all<'s>(
         &'s mut self,
-        query: &str,
+        query: &'s str,
     ) -> Result<TextResultsetStream<'s, Stream>, CommunicationError>
     where
         Stream: PacketReader,
@@ -136,9 +136,9 @@ pub struct Statement<'c, Stream: AsyncWriteExt + Unpin> {
     statement_id: u32,
 }
 impl<Stream: AsyncWriteExt + PacketReader + Unpin> SharedClient<Stream> {
-    pub async fn prepare<'c>(
+    pub async fn prepare<'c, 's: 'c>(
         &'c self,
-        statement: &str,
+        statement: &'s str,
     ) -> Result<Statement<'c, Stream>, CommunicationError> {
         let mut c = self.lock();
         let cap = c.capability;

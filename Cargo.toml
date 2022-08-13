@@ -8,10 +8,17 @@ edition = "2021"
 [dependencies]
 futures-util = "0.3.21"
 parking_lot = "0.12.1"
+rand = "0.8.5"
 ring = "0.16.20"
+rsa = "0.6"
+sha2 = "0.10.2"
 tokio = { version = "1.20.1", features = ["io-util"] }
 tokio-rustls = "0.23.4"
 webpki-roots = "0.22.4"
 
 [dev-dependencies]
 tokio = { version = "1.20", features = ["macros", "rt-multi-thread", "net"] }
+rustls = { version = "0.20.6", features = ["dangerous_configuration"] }
+untrusted = "0.7"
+webpki = "0.22"
+x509-parser = "0.14"

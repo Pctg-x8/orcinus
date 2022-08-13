@@ -14,12 +14,10 @@ async fn main() {
     println!("sequence id: {sequence_id}");
     println!("server_handshake: {server_handshake:?}");
     let client_capability;
-    let additional_authentication_method;
     match server_handshake {
         orcinus::protos::Handshake::V10Long(ref p) => {
             let auth_response = match p.auth_plugin_name {
                 Some(ref x) if x == orcinus::authentication::Native41::NAME => {
-                    additional_authentication_method = None;
                     orcinus::authentication::Native41 {
                         server_data_1: &p.short.auth_plugin_data_part_1,
                         server_data_2: p
@@ -30,37 +28,24 @@ async fn main() {
                     .generate("")
                 }
                 Some(ref x) if x == orcinus::authentication::ClearText::NAME => {
-                    additional_authentication_method = None;
                     orcinus::authentication::ClearText.generate("")
                 }
                 Some(ref x) if x == orcinus::authentication::SHA256::NAME => {
                     let a = orcinus::authentication::SHA256 {
-                        server_public_keyfile: None,
+                        server_spki_der: None,
                         scramble_buffer_1: &p.short.auth_plugin_data_part_1,
                         scramble_buffer_2: p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
                     };
-                    let bytes = a.generate("root");
-                    additional_authentication_method = Some((
-                        x,
-                        &p.short.auth_plugin_data_part_1,
-                        p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
-                    ));
-                    bytes
+                    a.generate("root")
                 }
                 Some(ref x) if x == orcinus::authentication::CachedSHA256::NAME => {
                     let a =
                         orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
-                            server_public_keyfile: None,
+                            server_spki_der: None,
                             scramble_buffer_1: &p.short.auth_plugin_data_part_1,
                             scramble_buffer_2: p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
                         });
-                    let bytes = a.generate("root");
-                    additional_authentication_method = Some((
-                        x,
-                        &p.short.auth_plugin_data_part_1,
-                        p.auth_plugin_data_part_2.as_deref().unwrap_or(&[]),
-                    ));
-                    bytes
+                    a.generate("root")
                 }
                 Some(ref x) => unreachable!("unknown auth plugin: {x}"),
                 None => unreachable!("auth plugin is not specified"),
@@ -121,34 +106,6 @@ async fn main() {
         _ => unreachable!("this handshake request cannot be processed"),
     }
     stream.flush().await.expect("Failed to flush buffer");
-    if let Some((name, s1, s2)) = additional_authentication_method {
-        let orcinus::protos::AuthMoreData(keyfile) =
-            orcinus::protos::AuthMoreData::read_packet(&mut stream)
-                .await
-                .expect("Failed to read more data for auth");
-        println!("keyfile: {keyfile:?}");
-        let auth_response = if name == orcinus::authentication::SHA256::NAME {
-            orcinus::authentication::SHA256 {
-                server_public_keyfile: Some(&keyfile),
-                scramble_buffer_1: s1,
-                scramble_buffer_2: s2,
-            }
-            .generate("root")
-        } else if name == orcinus::authentication::CachedSHA256::NAME {
-            orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
-                server_public_keyfile: Some(&keyfile),
-                scramble_buffer_1: s1,
-                scramble_buffer_2: s2,
-            })
-            .generate("root")
-        } else {
-            unreachable!("unknown authentication method for continue")
-        };
-        stream
-            .write_all(&auth_response)
-            .await
-            .expect("Failed to send auth response");
-    }
 
     let resp = orcinus::protos::HandshakeResult::read_packet(&mut stream, client_capability)
         .await
