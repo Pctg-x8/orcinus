@@ -1,7 +1,15 @@
 [package]
 name = "orcinus"
+description = "async-ready mysql protocol implementation / wrapper libraries"
 version = "0.1.0"
 edition = "2021"
+
+homepage = "https://github.com/Pctg-x8/orcinus"
+repository = "https://github.com/Pctg-x8/orcinus"
+readme = "README.md"
+license-file = "LICENSE"
+keywords = ["mysql"]
+categories = ["asynchronous", "database"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
