@@ -444,10 +444,7 @@ impl GenericResultPacket {
 }
 
 #[derive(Debug)]
-pub enum GenericOKErrPacket {
-    Ok(OKPacket),
-    Err(ErrPacket),
-}
+pub struct GenericOKErrPacket(Result<OKPacket, ErrPacket>, u8);
 impl GenericOKErrPacket {
     pub async fn read_packet(
         reader: &mut (impl PacketReader + Unpin),
@@ -464,23 +461,23 @@ impl GenericOKErrPacket {
                 client_capabilities,
             )
             .await
-            .map(Self::Err),
+            .map(|x| Self(Err(x), packet_header.sequence_id)),
             0x00 => OKPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
                 client_capabilities,
             )
             .await
-            .map(Self::Ok),
+            .map(|x| Self(Ok(x), packet_header.sequence_id)),
             _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
         }
     }
 
     #[inline]
-    pub fn into_result(self) -> Result<OKPacket, ErrPacket> {
-        match self {
-            Self::Ok(o) => Ok(o),
-            Self::Err(e) => Err(e),
+    pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
+        match self.0 {
+            Ok(e) => Ok((e, self.1)),
+            Err(e) => Err(e),
         }
     }
 }

@@ -1,5 +1,29 @@
 use futures_util::TryStreamExt;
-use orcinus::authentication::Authentication;
+use orcinus::{authentication::Authentication, protos::ClientPacket};
+use tokio::io::AsyncWriteExt;
+
+/// do not use this at other of localhost connection
+pub struct MysqlCertForceVerifier {
+    mysql_pubkey_der: std::sync::Arc<parking_lot::RwLock<Vec<u8>>>,
+}
+impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..])
+            .expect("invalid certificate format");
+        println!("end entity subject: {}", cert.1.subject);
+        *self.mysql_pubkey_der.write() = cert.1.public_key().raw.to_owned();
+
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -7,7 +31,7 @@ async fn main() {
         .await
         .expect("Failed to connect");
     let mut stream = tokio::io::BufStream::new(stream);
-    let (sequence_id, server_handshake) = orcinus::protos::Handshake::read_packet(&mut stream)
+    let (mut sequence_id, server_handshake) = orcinus::protos::Handshake::read_packet(&mut stream)
         .await
         .expect("Failed to read initial handshake");
     println!("sequence id: {sequence_id}");
@@ -26,8 +50,38 @@ async fn main() {
         .set_support_deprecate_eof()
         .set_connect_with_db()
         .set_client_plugin_auth()
-        .set_support_plugin_auth_lenenc_client_data();
+        .set_support_plugin_auth_lenenc_client_data()
+        .set_support_ssl();
     let capability = required_caps & server_caps;
+
+    sequence_id += 1;
+    orcinus::protos::SSLRequest {
+        capability: required_caps & server_caps,
+        max_packet_size: 16777216,
+        character_set: 0xff,
+    }
+    .write_packet(&mut stream, sequence_id)
+    .await
+    .expect("Failed to send ssl request");
+    stream.flush().await.expect("Failed to flush stream");
+
+    let mysql_pubkey = std::sync::Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let mut cc = tokio_rustls::rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(std::sync::Arc::new(MysqlCertForceVerifier {
+            mysql_pubkey_der: mysql_pubkey.clone(),
+        }))
+        .with_no_client_auth();
+    cc.enable_sni = false;
+    let stream = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cc))
+        .connect(
+            tokio_rustls::rustls::ServerName::try_from("localhost").expect("invalid dns name?"),
+            stream.into_inner(),
+        )
+        .await
+        .expect("Failed to connect tls");
+    let mut stream = tokio::io::BufStream::new(stream);
+    let mysql_spki = std::mem::replace(&mut *mysql_pubkey.write(), Vec::new());
 
     let con_info = orcinus::authentication::ConnectionInfo {
         client_capabilities: capability,
@@ -64,7 +118,7 @@ async fn main() {
                 .expect("Failed to authenticate")
         }
         Some(x) if x == orcinus::authentication::SHA256::NAME => orcinus::authentication::SHA256 {
-            server_spki_der: None,
+            server_spki_der: Some(&mysql_spki),
             scramble_buffer_1: auth_data_1,
             scramble_buffer_2: auth_data_2.unwrap_or(&[]),
         }
@@ -73,7 +127,7 @@ async fn main() {
         .expect("Failed to authenticate"),
         Some(x) if x == orcinus::authentication::CachedSHA256::NAME => {
             orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
-                server_spki_der: None,
+                server_spki_der: Some(&mysql_spki),
                 scramble_buffer_1: auth_data_1,
                 scramble_buffer_2: auth_data_2.unwrap_or(&[]),
             })

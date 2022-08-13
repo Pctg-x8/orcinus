@@ -119,7 +119,7 @@ pub struct HandshakeResponse41<'s> {
     pub max_packet_size: u32,
     pub character_set: u8,
     pub username: &'s str,
-    pub auth_response: HandshakeResponse41AuthResponse<'s>,
+    pub auth_response: &'s [u8],
     pub database: Option<&'s str>,
     pub auth_plugin_name: Option<&'s str>,
     pub connect_attrs: HashMap<&'s str, &'s str>,
@@ -128,15 +128,6 @@ impl HandshakeResponse41<'_> {
     pub fn compute_final_capability_flags(&self) -> CapabilityFlags {
         let mut caps = self.capability;
         caps.set_support_41_protocol();
-        match self.auth_response {
-            HandshakeResponse41AuthResponse::PluginAuthLenEnc(_) => {
-                caps.set_support_plugin_auth_lenenc_client_data();
-            }
-            HandshakeResponse41AuthResponse::SecureConnection(_) => {
-                caps.set_support_secure_connection();
-            }
-            _ => (),
-        };
         if self.database.is_some() {
             caps.set_connect_with_db();
         } else {
@@ -167,23 +158,19 @@ impl super::ClientPacket for HandshakeResponse41<'_> {
         sink.extend(std::iter::repeat(0).take(23));
         sink.extend(self.username.as_bytes());
         sink.push(0);
-        match self.auth_response {
-            HandshakeResponse41AuthResponse::PluginAuthLenEnc(bytes) => {
-                unsafe {
-                    LengthEncodedInteger(bytes.len() as _)
-                        .write_sync(&mut sink)
-                        .unwrap_unchecked()
-                };
-                sink.extend(bytes);
-            }
-            HandshakeResponse41AuthResponse::SecureConnection(bytes) => {
-                sink.push(bytes.len() as u8);
-                sink.extend(bytes);
-            }
-            HandshakeResponse41AuthResponse::Plain(bytes) => {
-                sink.extend(bytes);
-                sink.push(0);
-            }
+        if caps.support_plugin_auth_lenenc_client_data() {
+            unsafe {
+                LengthEncodedInteger(self.auth_response.len() as _)
+                    .write_sync(&mut sink)
+                    .unwrap_unchecked()
+            };
+            sink.extend(self.auth_response);
+        } else if caps.support_secure_connection() {
+            sink.push(self.auth_response.len() as u8);
+            sink.extend(self.auth_response);
+        } else {
+            sink.extend(self.auth_response);
+            sink.push(0);
         }
         if let Some(db) = self.database {
             sink.extend(db.as_bytes());
@@ -325,7 +312,7 @@ impl AuthMoreData {
     }
 }
 
-pub struct AuthMoreDataResponse(Result<AuthMoreData, ErrPacket>);
+pub struct AuthMoreDataResponse(Result<AuthMoreData, ErrPacket>, u8);
 impl AuthMoreDataResponse {
     pub async fn read_packet(
         reader: &mut (impl PacketReader + Unpin),
@@ -342,17 +329,17 @@ impl AuthMoreDataResponse {
                 client_capability,
             )
             .await
-            .map(|e| Self(Err(e))),
+            .map(|e| Self(Err(e), packet_header.sequence_id)),
             0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
                 .await
-                .map(|x| Self(Ok(x))),
+                .map(|x| Self(Ok(x), packet_header.sequence_id)),
             _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
         }
     }
 
     #[inline]
-    pub fn into_result(self) -> Result<AuthMoreData, ErrPacket> {
-        self.0
+    pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
+        self.0.map(|x| (x, self.1))
     }
 }
 
