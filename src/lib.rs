@@ -19,6 +19,9 @@ use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tokio::io::AsyncWriteExt;
 
+use crate::authentication::Authentication;
+use crate::protos::Handshake;
+
 pub use self::mysql::*;
 
 mod resultset_stream;
@@ -51,13 +54,134 @@ impl<Stream: AsyncWriteExt + Unpin> SharedClient<Stream> {
     }
 }
 
+pub struct ConnectInfo<'s> {
+    username: &'s str,
+    password: &'s str,
+    database: Option<&'s str>,
+    max_packet_size: u32,
+    character_set: u8,
+}
+impl<'s> ConnectInfo<'s> {
+    pub fn new(username: &'s str, password: &'s str) -> Self {
+        Self {
+            username,
+            password,
+            database: None,
+            max_packet_size: 16777216,
+            character_set: 0xff,
+        }
+    }
+
+    /// Sets initial connected database name: default is `None`
+    pub fn database(mut self, db_name: &'s str) -> Self {
+        self.database = Some(db_name);
+        self
+    }
+
+    /// Sets max packet size: default is big enough value
+    pub fn max_packet_size(mut self, packet_size: u32) -> Self {
+        self.max_packet_size = packet_size;
+        self
+    }
+
+    /// Sets character set: default is utf8mb4
+    pub fn character_set(mut self, character_set: u8) -> Self {
+        self.character_set = character_set;
+        self
+    }
+}
+
 pub struct Client<Stream: AsyncWriteExt + Unpin> {
     stream: Stream,
     capability: CapabilityFlags,
 }
 impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
-    /// TODO
-    pub fn new(stream: Stream, capability: CapabilityFlags) -> Self {
+    pub async fn handshake(
+        mut stream: Stream,
+        connect_info: &ConnectInfo<'_>,
+    ) -> Result<Self, CommunicationError>
+    where
+        Stream: PacketReader,
+    {
+        let (sequence_id, server_handshake) = Handshake::read_packet(&mut stream)
+            .await
+            .expect("Failed to read initial handshake");
+
+        let server_caps = match server_handshake {
+            Handshake::V10Long(ref p) => p.short.capability_flags,
+            Handshake::V10Short(ref p) => p.capability_flags,
+            _ => CapabilityFlags::new(),
+        };
+        let mut required_caps = CapabilityFlags::new();
+        required_caps
+            .set_support_41_protocol()
+            .set_support_secure_connection()
+            .set_use_long_password()
+            .set_support_deprecate_eof()
+            .set_client_plugin_auth()
+            .set_support_plugin_auth_lenenc_client_data();
+        if connect_info.database.is_some() {
+            required_caps.set_connect_with_db();
+        }
+        let capability = required_caps & server_caps;
+
+        let con_info = authentication::ConnectionInfo {
+            client_capabilities: capability,
+            max_packet_size: connect_info.max_packet_size,
+            character_set: connect_info.character_set,
+            username: connect_info.username,
+            password: connect_info.password,
+            database: connect_info.database,
+        };
+
+        let (auth_plugin_name, auth_data_1, auth_data_2) = match server_handshake {
+            Handshake::V10Long(ref p) => (
+                p.auth_plugin_name.as_deref(),
+                &p.short.auth_plugin_data_part_1[..],
+                p.auth_plugin_data_part_2.as_deref(),
+            ),
+            Handshake::V10Short(ref p) => (None, &p.auth_plugin_data_part_1[..], None),
+            Handshake::V9(ref p) => (None, p.scramble.as_bytes(), None),
+        };
+        match auth_plugin_name {
+            Some(x) if x == authentication::Native41::NAME => authentication::Native41 {
+                server_data_1: auth_data_1,
+                server_data_2: auth_data_2.expect("no extra data passed from server"),
+            }
+            .run(&mut stream, &con_info, sequence_id + 1)
+            .await
+            .expect("Failed to authenticate"),
+            Some(x) if x == authentication::ClearText::NAME => authentication::ClearText
+                .run(&mut stream, &con_info, sequence_id + 1)
+                .await
+                .expect("Failed to authenticate"),
+            Some(x) if x == authentication::SHA256::NAME => authentication::SHA256 {
+                server_spki_der: None,
+                scramble_buffer_1: auth_data_1,
+                scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+            }
+            .run(&mut stream, &con_info, sequence_id + 1)
+            .await
+            .expect("Failed to authenticate"),
+            Some(x) if x == authentication::CachedSHA256::NAME => {
+                authentication::CachedSHA256(authentication::SHA256 {
+                    server_spki_der: None,
+                    scramble_buffer_1: auth_data_1,
+                    scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+                })
+                .run(&mut stream, &con_info, sequence_id + 1)
+                .await
+                .expect("Failed to authenticate")
+            }
+            Some(x) => unreachable!("unknown auth plugin: {x}"),
+            None => unreachable!("auth plugin is not specified"),
+        };
+
+        Ok(unsafe { Self::new(stream, capability) })
+    }
+
+    /// this function does not perform handshaking. user must be done the operation.
+    pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
         Self {
             stream: stream,
             capability,

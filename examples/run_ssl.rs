@@ -140,7 +140,7 @@ async fn main() {
     };
     println!("connection: {resp:?}");
 
-    let mut client = orcinus::Client::new(stream, capability);
+    let mut client = unsafe { orcinus::Client::new(stream, capability) };
     {
         let mut row_stream = client
             .fetch_all("Select * from friends")

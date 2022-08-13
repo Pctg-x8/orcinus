@@ -1,92 +1,17 @@
 use futures_util::TryStreamExt;
-use orcinus::authentication::Authentication;
 
 #[tokio::main]
 async fn main() {
     let stream = tokio::net::TcpStream::connect("127.0.0.1:3306")
         .await
         .expect("Failed to connect");
-    let mut stream = tokio::io::BufStream::new(stream);
-    let (sequence_id, server_handshake) = orcinus::protos::Handshake::read_packet(&mut stream)
+    let stream = tokio::io::BufStream::new(stream);
+
+    let connect_info = orcinus::ConnectInfo::new("root", "root").database("sandstar");
+    let mut client = orcinus::Client::handshake(stream, &connect_info)
         .await
-        .expect("Failed to read initial handshake");
-    println!("sequence id: {sequence_id}");
-    println!("server_handshake: {server_handshake:?}");
+        .expect("Failed to connect to db server");
 
-    let server_caps = match server_handshake {
-        orcinus::protos::Handshake::V10Long(ref p) => p.short.capability_flags,
-        orcinus::protos::Handshake::V10Short(ref p) => p.capability_flags,
-        _ => orcinus::protos::CapabilityFlags::new(),
-    };
-    let mut required_caps = orcinus::protos::CapabilityFlags::new();
-    required_caps
-        .set_support_41_protocol()
-        .set_support_secure_connection()
-        .set_use_long_password()
-        .set_support_deprecate_eof()
-        .set_connect_with_db()
-        .set_client_plugin_auth()
-        .set_support_plugin_auth_lenenc_client_data();
-    let capability = required_caps & server_caps;
-
-    let con_info = orcinus::authentication::ConnectionInfo {
-        client_capabilities: capability,
-        max_packet_size: 16777216,
-        character_set: 0xff,
-        username: "root",
-        password: "root",
-        database: Some("sandstar"),
-    };
-
-    let (auth_plugin_name, auth_data_1, auth_data_2) = match server_handshake {
-        orcinus::protos::Handshake::V10Long(ref p) => (
-            p.auth_plugin_name.as_deref(),
-            &p.short.auth_plugin_data_part_1[..],
-            p.auth_plugin_data_part_2.as_deref(),
-        ),
-        orcinus::protos::Handshake::V10Short(ref p) => (None, &p.auth_plugin_data_part_1[..], None),
-        orcinus::protos::Handshake::V9(ref p) => (None, p.scramble.as_bytes(), None),
-    };
-    let (resp, _) = match auth_plugin_name {
-        Some(x) if x == orcinus::authentication::Native41::NAME => {
-            orcinus::authentication::Native41 {
-                server_data_1: auth_data_1,
-                server_data_2: auth_data_2.expect("no extra data passed from server"),
-            }
-            .run(&mut stream, &con_info, sequence_id + 1)
-            .await
-            .expect("Failed to authenticate")
-        }
-        Some(x) if x == orcinus::authentication::ClearText::NAME => {
-            orcinus::authentication::ClearText
-                .run(&mut stream, &con_info, sequence_id + 1)
-                .await
-                .expect("Failed to authenticate")
-        }
-        Some(x) if x == orcinus::authentication::SHA256::NAME => orcinus::authentication::SHA256 {
-            server_spki_der: None,
-            scramble_buffer_1: auth_data_1,
-            scramble_buffer_2: auth_data_2.unwrap_or(&[]),
-        }
-        .run(&mut stream, &con_info, sequence_id + 1)
-        .await
-        .expect("Failed to authenticate"),
-        Some(x) if x == orcinus::authentication::CachedSHA256::NAME => {
-            orcinus::authentication::CachedSHA256(orcinus::authentication::SHA256 {
-                server_spki_der: None,
-                scramble_buffer_1: auth_data_1,
-                scramble_buffer_2: auth_data_2.unwrap_or(&[]),
-            })
-            .run(&mut stream, &con_info, sequence_id + 1)
-            .await
-            .expect("Failed to authenticate")
-        }
-        Some(x) => unreachable!("unknown auth plugin: {x}"),
-        None => unreachable!("auth plugin is not specified"),
-    };
-    println!("connection: {resp:?}");
-
-    let mut client = orcinus::Client::new(stream, capability);
     {
         let mut row_stream = client
             .fetch_all("Select * from friends")
