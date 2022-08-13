@@ -65,6 +65,14 @@ impl CapabilityFlags {
         self
     }
 
+    pub fn support_ssl(&self) -> bool {
+        (self.0 & 0x0000_0800) != 0
+    }
+    pub fn set_support_ssl(&mut self) -> &mut Self {
+        self.0 |= 0x0000_0800;
+        self
+    }
+
     pub fn support_transaction(&self) -> bool {
         (self.0 & 0x0000_2000) != 0
     }

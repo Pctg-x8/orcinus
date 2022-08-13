@@ -273,6 +273,24 @@ impl super::ClientPacket for HandshakeResponse320<'_> {
     }
 }
 
+pub struct SSLRequest {
+    pub capability: CapabilityFlags,
+    pub max_packet_size: u32,
+    pub character_set: u8,
+}
+impl super::ClientPacket for SSLRequest {
+    fn serialize_payload(&self) -> Vec<u8> {
+        let mut sink = Vec::with_capacity(32);
+
+        sink.extend(self.capability.0.to_le_bytes());
+        sink.extend(self.max_packet_size.to_le_bytes());
+        sink.push(self.character_set);
+        sink.extend(std::iter::repeat(0).take(23));
+
+        sink
+    }
+}
+
 #[repr(transparent)]
 pub struct AuthMoreData(pub Vec<u8>);
 impl AuthMoreData {
