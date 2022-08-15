@@ -42,6 +42,15 @@ impl From<ErrPacket> for CommunicationError {
         Self::Server(e)
     }
 }
+impl std::fmt::Display for CommunicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IO(io) => write!(f, "IO Error: {io}"),
+            Self::Server(e) => write!(f, "Server Error: {}", e.error_message),
+        }
+    }
+}
+impl std::error::Error for CommunicationError {}
 
 pub struct SharedClient<Stream: AsyncWriteExt + Unpin>(Mutex<Client<Stream>>);
 impl<Stream: AsyncWriteExt + Unpin> SharedClient<Stream> {
@@ -192,9 +201,8 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         SharedClient(Mutex::new(self))
     }
 
-    pub async fn quit(mut self) -> std::io::Result<()> {
+    pub async fn quit(&mut self) -> std::io::Result<()> {
         QuitCommand.write_packet(&mut self.stream, 0).await?;
-        std::mem::forget(self);
         Ok(())
     }
 
@@ -255,15 +263,33 @@ impl<Stream: AsyncWriteExt + Unpin> Drop for Client<Stream> {
     }
 }
 
-pub struct Statement<'c, Stream: AsyncWriteExt + Unpin> {
-    client: &'c SharedClient<Stream>,
+pub trait SharedMysqlClient<'s> {
+    type Stream: AsyncWriteExt + Unpin;
+    type GuardedClientRef: 's + std::ops::Deref<Target = Client<Self::Stream>> + std::ops::DerefMut;
+
+    fn lock_client(&'s self) -> Self::GuardedClientRef;
+}
+impl<'s, S> SharedMysqlClient<'s> for SharedClient<S>
+where
+    S: AsyncWriteExt + Unpin + 's,
+{
+    type Stream = S;
+    type GuardedClientRef = MutexGuard<'s, Client<S>>;
+
+    fn lock_client(&'s self) -> Self::GuardedClientRef {
+        self.0.lock()
+    }
+}
+
+pub struct Statement<'c, C: SharedMysqlClient<'c>> {
+    client: &'c C,
     statement_id: u32,
 }
 impl<Stream: AsyncWriteExt + PacketReader + Unpin> SharedClient<Stream> {
     pub async fn prepare<'c, 's: 'c>(
         &'c self,
         statement: &'s str,
-    ) -> Result<Statement<'c, Stream>, CommunicationError> {
+    ) -> Result<Statement<'c, Self>, CommunicationError> {
         let mut c = self.lock();
         let cap = c.capability;
 
@@ -298,10 +324,10 @@ impl<Stream: AsyncWriteExt + PacketReader + Unpin> SharedClient<Stream> {
         })
     }
 }
-impl<Stream: AsyncWriteExt + Unpin> Statement<'_, Stream> {
+impl<'c, C: SharedMysqlClient<'c>> Statement<'c, C> {
     pub async fn close(self) -> std::io::Result<()> {
         StmtCloseCommand(self.statement_id)
-            .write_packet(&mut self.client.0.lock().stream, 0)
+            .write_packet(&mut self.client.lock_client().stream, 0)
             .await?;
         std::mem::forget(self);
         Ok(())
@@ -309,9 +335,9 @@ impl<Stream: AsyncWriteExt + Unpin> Statement<'_, Stream> {
 
     pub async fn reset(&mut self) -> Result<(), CommunicationError>
     where
-        Stream: PacketReader,
+        C::Stream: PacketReader,
     {
-        let mut c = self.client.0.lock();
+        let mut c = self.client.lock_client();
         let cap = c.capability;
 
         StmtResetCommand(self.statement_id)
@@ -332,9 +358,9 @@ impl<Stream: AsyncWriteExt + Unpin> Statement<'_, Stream> {
         rebound_parameters: bool,
     ) -> std::io::Result<StmtExecuteResult>
     where
-        Stream: PacketReader,
+        C::Stream: PacketReader,
     {
-        let mut c = self.client.0.lock();
+        let mut c = self.client.lock_client();
         let cap = c.capability;
 
         StmtExecuteCommand {
@@ -349,7 +375,7 @@ impl<Stream: AsyncWriteExt + Unpin> Statement<'_, Stream> {
         StmtExecuteResult::read_packet(&mut c.stream, cap).await
     }
 }
-impl<Stream: AsyncWriteExt + Unpin> Drop for Statement<'_, Stream> {
+impl<'c, C: SharedMysqlClient<'c>> Drop for Statement<'c, C> {
     fn drop(&mut self) {
         eprintln!(
             "warning: statement #{} has dropped without explicit closing",
@@ -357,3 +383,6 @@ impl<Stream: AsyncWriteExt + Unpin> Drop for Statement<'_, Stream> {
         )
     }
 }
+
+#[cfg(feature = "r2d2-integration")]
+pub mod r2d2;

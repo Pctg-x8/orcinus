@@ -1,4 +1,4 @@
-use std::{pin::Pin, task::Poll};
+use std::{io::Read, pin::Pin, task::Poll};
 
 use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncReadExt, Result as IOResult};
@@ -97,6 +97,45 @@ where
                 std::task::Poll::Ready(Ok(()))
             }
         }
+    }
+}
+impl<R> Read for ReadCounted<R>
+where
+    R: Read,
+{
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        let bytes = R::read(&mut self.inner, buf)?;
+        self.counter
+            .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel);
+        Ok(bytes)
+    }
+}
+
+pub struct ReadCountedSync<R> {
+    inner: R,
+    counter: usize,
+}
+impl<R> ReadCountedSync<R> {
+    pub const fn new(inner: R) -> Self {
+        Self { inner, counter: 0 }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    pub fn read_bytes(&self) -> usize {
+        self.counter
+    }
+}
+impl<R> Read for ReadCountedSync<R>
+where
+    R: Read,
+{
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        let bytes = R::read(&mut self.inner, buf)?;
+        self.counter += bytes;
+        Ok(bytes)
     }
 }
 

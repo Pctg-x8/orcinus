@@ -9,6 +9,10 @@ impl CapabilityFlags {
         Self(0)
     }
 
+    pub const fn combine_upper_bytes(self, ub: u16) -> Self {
+        Self(self.0 & 0xffff | ((ub as u32) << 16))
+    }
+
     pub async fn read_lower_bits(
         reader: &mut (impl PacketReader + Unpin),
     ) -> std::io::Result<Self> {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::ReadCounted;
+use crate::protos::format::ProtocolFormatFragment;
+use crate::{protos::format, ReadCounted};
 
 use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
@@ -15,6 +17,43 @@ pub struct HandshakeV10Short {
     pub auth_plugin_data_part_1: [u8; 8],
     pub capability_flags: CapabilityFlags,
 }
+impl HandshakeV10Short {
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+        let server_version = reader.read_null_terminated_string().await?;
+        let connection_id = reader.read_u32_le().await?;
+        let mut auth_plugin_data_part_1 = [0u8; 8];
+        reader.read_exact(&mut auth_plugin_data_part_1).await?;
+        let mut _filler = [0u8; 1];
+        reader.read_exact(&mut _filler).await?;
+        let capability_flags = CapabilityFlags::read_lower_bits(reader).await?;
+
+        Ok(Self {
+            server_version,
+            connection_id,
+            auth_plugin_data_part_1,
+            capability_flags,
+        })
+    }
+
+    pub async fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let (server_version, connection_id, auth_plugin_data_part_1, _filler, capability_flags) = (
+            format::NullTerminatedString,
+            format::U32,
+            format::FixedBytes::<8>,
+            format::FixedBytes::<1>,
+            format::U16,
+        )
+            .read_sync(reader)?;
+
+        Ok(Self {
+            server_version,
+            connection_id,
+            auth_plugin_data_part_1,
+            capability_flags: CapabilityFlags(capability_flags as _),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct HandshakeV10Long {
     pub short: HandshakeV10Short,
@@ -23,12 +62,122 @@ pub struct HandshakeV10Long {
     pub auth_plugin_data_part_2: Option<Vec<u8>>,
     pub auth_plugin_name: Option<String>,
 }
+impl HandshakeV10Long {
+    pub async fn read_additional(
+        short: HandshakeV10Short,
+        reader: &mut (impl AsyncReadExt + Unpin),
+    ) -> std::io::Result<Self> {
+        let character_set = reader.read_u8().await?;
+        let status_flags = reader.read_u16_le().await?;
+        let capability_flags = short
+            .capability_flags
+            .additional_read_upper_bits(reader)
+            .await?;
+        let auth_plugin_data_length = reader.read_u8().await?;
+        let mut _filler = [0u8; 10];
+        reader.read_exact(&mut _filler).await?;
+        let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
+            let mut data = vec![0u8; 13.max(auth_plugin_data_length - 8) as _];
+            reader.read_exact(&mut data).await?;
+            Some(data)
+        } else {
+            None
+        };
+        let auth_plugin_name = if capability_flags.support_plugin_auth() {
+            Some(reader.read_null_terminated_string().await?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            short: HandshakeV10Short {
+                capability_flags,
+                ..short
+            },
+            character_set,
+            status_flags,
+            auth_plugin_data_part_2,
+            auth_plugin_name,
+        })
+    }
+
+    pub fn read_additional_sync(
+        short: HandshakeV10Short,
+        reader: &mut impl Read,
+    ) -> std::io::Result<Self> {
+        let (
+            character_set,
+            status_flags,
+            capability_flags_upper_bits,
+            auth_plugin_data_length,
+            _filler,
+        ) = (
+            format::U8,
+            format::U16,
+            format::U16,
+            format::U8,
+            format::FixedBytes::<10>,
+        )
+            .read_sync(reader)?;
+        let capability_flags = short
+            .capability_flags
+            .combine_upper_bytes(capability_flags_upper_bits);
+
+        let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
+            Some(format::Bytes(13.max(auth_plugin_data_length - 8) as _).read_sync(reader)?)
+        } else {
+            None
+        };
+        let auth_plugin_name = if capability_flags.support_plugin_auth() {
+            Some(format::NullTerminatedString.read_sync(reader)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            short: HandshakeV10Short {
+                capability_flags,
+                ..short
+            },
+            character_set,
+            status_flags,
+            auth_plugin_data_part_2,
+            auth_plugin_name,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct HandshakeV9 {
     pub server_version: String,
     pub connection_id: u32,
     pub scramble: String,
 }
+impl HandshakeV9 {
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+        Ok(Self {
+            server_version: reader.read_null_terminated_string().await?,
+            connection_id: reader.read_u32_le().await?,
+            scramble: reader.read_null_terminated_string().await?,
+        })
+    }
+
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let (server_version, connection_id, scramble) = (
+            format::NullTerminatedString,
+            format::U32,
+            format::NullTerminatedString,
+        )
+            .read_sync(reader)?;
+
+        Ok(Self {
+            server_version,
+            connection_id,
+            scramble,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum Handshake {
     V9(HandshakeV9),
@@ -42,67 +191,22 @@ impl Handshake {
         let packet_header = reader.read_packet_header().await?;
         let protocol_version = reader.read_u8().await?;
 
-        let decoded_payload = if protocol_version == 9 {
-            Self::V9(HandshakeV9 {
-                server_version: reader.read_null_terminated_string().await?,
-                connection_id: reader.read_u32_le().await?,
-                scramble: reader.read_null_terminated_string().await?,
-            })
-        } else if protocol_version == 10 {
-            let mut reader = ReadCounted::new(reader);
-            let server_version = reader.read_null_terminated_string().await?;
-            let connection_id = reader.read_u32_le().await?;
-            let mut auth_plugin_data_part_1 = [0u8; 8];
-            reader.read_exact(&mut auth_plugin_data_part_1).await?;
-            let mut _filler = [0u8; 1];
-            reader.read_exact(&mut _filler).await?;
-            let capability_flags = CapabilityFlags::read_lower_bits(&mut reader).await?;
+        let decoded_payload = match protocol_version {
+            9 => Self::V9(HandshakeV9::read(reader).await?),
+            10 => {
+                let mut reader = ReadCounted::new(reader);
+                let short = HandshakeV10Short::read(&mut reader).await?;
 
-            if packet_header.payload_length as usize > reader.read_bytes() {
-                // more data available
-                let character_set = reader.read_u8().await?;
-                let status_flags = reader.read_u16_le().await?;
-                let capability_flags = capability_flags
-                    .additional_read_upper_bits(&mut reader)
-                    .await?;
-                let auth_plugin_data_length = reader.read_u8().await?;
-                let mut _filler = [0u8; 10];
-                reader.read_exact(&mut _filler).await?;
-                let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
-                    let mut data = vec![0u8; 13.max(auth_plugin_data_length - 8) as _];
-                    reader.read_exact(&mut data).await?;
-                    Some(data)
+                if packet_header.payload_length as usize > reader.read_bytes() {
+                    // more data available
+                    Self::V10Long(
+                        HandshakeV10Long::read_additional(short, reader.into_inner()).await?,
+                    )
                 } else {
-                    None
-                };
-                let auth_plugin_name = if capability_flags.support_plugin_auth() {
-                    Some(reader.read_null_terminated_string().await?)
-                } else {
-                    None
-                };
-
-                Self::V10Long(HandshakeV10Long {
-                    short: HandshakeV10Short {
-                        server_version,
-                        connection_id,
-                        auth_plugin_data_part_1,
-                        capability_flags,
-                    },
-                    character_set,
-                    status_flags,
-                    auth_plugin_data_part_2,
-                    auth_plugin_name,
-                })
-            } else {
-                Self::V10Short(HandshakeV10Short {
-                    server_version,
-                    connection_id,
-                    auth_plugin_data_part_1,
-                    capability_flags,
-                })
+                    Self::V10Short(short)
+                }
             }
-        } else {
-            unreachable!("invalid protocol version: {protocol_version}");
+            _ => unreachable!("unsupported protocol version: {protocol_version}"),
         };
 
         Ok((packet_header.sequence_id, decoded_payload))
