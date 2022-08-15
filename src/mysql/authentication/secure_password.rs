@@ -3,7 +3,7 @@ use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY as SHA1};
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-    protos::{GenericOKErrPacket, OKPacket},
+    protos::{ClientPacket, GenericOKErrPacket, OKPacket},
     CommunicationError, PacketReader,
 };
 
@@ -44,7 +44,8 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
             );
 
             con_info
-                .send_handshake_response(stream, &payload, Some(Self::NAME), first_sequence_id)
+                .make_handshake_response(&payload, Some(Self::NAME))
+                .write_packet(stream, first_sequence_id)
                 .await?;
             stream.flush().await?;
             let (resp, sequence_id) =
@@ -55,5 +56,28 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
             Ok((resp, sequence_id))
         }
         .boxed_local()
+    }
+
+    fn run_sync(
+        &self,
+        stream: &mut (impl std::io::Read + std::io::Write),
+        con_info: &super::ConnectionInfo,
+        first_sequence_id: u8,
+    ) -> Result<(OKPacket, u8), CommunicationError> {
+        let payload = gen_secure_password_auth_response(
+            con_info.password,
+            self.server_data_1,
+            self.server_data_2,
+        );
+
+        con_info
+            .make_handshake_response(&payload, Some(Self::NAME))
+            .write_packet_sync(stream, first_sequence_id)?;
+        stream.flush()?;
+        let (resp, sequence_id) =
+            GenericOKErrPacket::read_packet_sync(stream, con_info.client_capabilities)?
+                .into_result()?;
+
+        Ok((resp, sequence_id))
     }
 }

@@ -1,11 +1,13 @@
+use std::io::Read;
+
 use tokio::io::AsyncReadExt;
 
 use crate::{
     protos::{
-        read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
+        format::{self, ProtocolFormatFragment}, read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
         InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
     },
-    PacketReader, ReadCounted,
+    PacketReader, ReadCounted, ReadCountedSync,
 };
 
 pub struct QueryCommand<'s>(pub &'s str);
@@ -64,6 +66,43 @@ impl QueryCommandResponse {
             _ => {
                 let LengthEncodedInteger(column_count) =
                     LengthEncodedInteger::read_ahead(head_value, &mut reader).await?;
+                Ok(Self::Resultset { column_count })
+            }
+        }
+    }
+
+    pub fn read_packet_sync(
+        reader: &mut impl Read,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_value = format::U8.read_sync(&mut reader)?;
+
+        match head_value {
+            0x00 => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Ok),
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Err),
+            0xfb => {
+                let filename = format::FixedLengthString(
+                    packet_header.payload_length as usize - reader.read_bytes(),
+                )
+                .read_sync(&mut reader)?;
+
+                Ok(Self::LocalInfileRequest { filename })
+            }
+            _ => {
+                let column_count = format::LengthEncodedInteger.read_sync(reader.into_inner())?;
+
                 Ok(Self::Resultset { column_count })
             }
         }

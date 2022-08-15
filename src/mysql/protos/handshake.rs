@@ -5,10 +5,11 @@ use tokio::io::AsyncReadExt;
 
 use crate::protos::format::ProtocolFormatFragment;
 use crate::{protos::format, ReadCounted};
+use crate::{ReadCountedSync, ReadSync};
 
 use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
-use super::{ErrPacket, LengthEncodedInteger, OKPacket};
+use super::{ErrPacket, LengthEncodedInteger};
 
 #[derive(Debug)]
 pub struct HandshakeV10Short {
@@ -35,15 +36,14 @@ impl HandshakeV10Short {
         })
     }
 
-    pub async fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let (server_version, connection_id, auth_plugin_data_part_1, _filler, capability_flags) = (
-            format::NullTerminatedString,
-            format::U32,
-            format::FixedBytes::<8>,
-            format::FixedBytes::<1>,
-            format::U16,
-        )
-            .read_sync(reader)?;
+    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            server_version <- format::NullTerminatedString,
+            connection_id <- format::U32,
+            auth_plugin_data_part_1 <- format::FixedBytes::<8>,
+            _filler <- format::FixedBytes::<1>,
+            capability_flags <- format::U16
+        });
 
         Ok(Self {
             server_version,
@@ -105,20 +105,13 @@ impl HandshakeV10Long {
         short: HandshakeV10Short,
         reader: &mut impl Read,
     ) -> std::io::Result<Self> {
-        let (
-            character_set,
-            status_flags,
-            capability_flags_upper_bits,
-            auth_plugin_data_length,
-            _filler,
-        ) = (
-            format::U8,
-            format::U16,
-            format::U16,
-            format::U8,
-            format::FixedBytes::<10>,
-        )
-            .read_sync(reader)?;
+        ReadSync!(reader => {
+            character_set <- format::U8,
+            status_flags <- format::U16,
+            capability_flags_upper_bits <- format::U16,
+            auth_plugin_data_length <- format::U8,
+            _filler <- format::FixedBytes::<10>
+        });
         let capability_flags = short
             .capability_flags
             .combine_upper_bytes(capability_flags_upper_bits);
@@ -163,12 +156,11 @@ impl HandshakeV9 {
     }
 
     pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let (server_version, connection_id, scramble) = (
-            format::NullTerminatedString,
-            format::U32,
-            format::NullTerminatedString,
-        )
-            .read_sync(reader)?;
+        ReadSync!(reader => {
+            server_version <- format::NullTerminatedString,
+            connection_id <- format::U32,
+            scramble <- format::NullTerminatedString
+        });
 
         Ok(Self {
             server_version,
@@ -187,7 +179,7 @@ pub enum Handshake {
 impl Handshake {
     pub async fn read_packet(
         reader: &mut (impl PacketReader + Unpin),
-    ) -> std::io::Result<(u8, Self)> {
+    ) -> std::io::Result<(Self, u8)> {
         let packet_header = reader.read_packet_header().await?;
         let protocol_version = reader.read_u8().await?;
 
@@ -209,7 +201,35 @@ impl Handshake {
             _ => unreachable!("unsupported protocol version: {protocol_version}"),
         };
 
-        Ok((packet_header.sequence_id, decoded_payload))
+        Ok((decoded_payload, packet_header.sequence_id))
+    }
+
+    pub fn read_packet_sync(reader: &mut impl Read) -> std::io::Result<(Self, u8)> {
+        ReadSync!(reader => {
+            packet_header <- format::PacketHeader,
+            protocol_version <- format::U8
+        });
+
+        let decoded_payload = match protocol_version {
+            9 => Self::V9(HandshakeV9::read_sync(reader)?),
+            10 => {
+                let mut reader = ReadCountedSync::new(reader);
+                let short = HandshakeV10Short::read_sync(&mut reader)?;
+
+                if packet_header.payload_length as usize > reader.read_bytes() {
+                    // more data available
+                    Self::V10Long(HandshakeV10Long::read_additional_sync(
+                        short,
+                        reader.into_inner(),
+                    )?)
+                } else {
+                    Self::V10Short(short)
+                }
+            },
+            _ => unreachable!("unsupported protocol version: {protocol_version}")
+        };
+
+        Ok((decoded_payload, packet_header.sequence_id))
     }
 }
 
@@ -364,6 +384,19 @@ impl super::ClientPacket for HandshakeResponse320<'_> {
     }
 }
 
+pub enum HandshakeResponse<'s> {
+    New(HandshakeResponse41<'s>),
+    Old(HandshakeResponse320<'s>),
+}
+impl super::ClientPacket for HandshakeResponse<'_> {
+    fn serialize_payload(&self) -> Vec<u8> {
+        match self {
+            Self::New(n) => n.serialize_payload(),
+            Self::Old(n) => n.serialize_payload(),
+        }
+    }
+}
+
 pub struct SSLRequest {
     pub capability: CapabilityFlags,
     pub max_packet_size: u32,
@@ -403,6 +436,15 @@ impl AuthMoreData {
         Self::read(packet_header.payload_length as _, &mut reader).await
     }
 
+    pub fn expected_read_packet_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let heading = format::U8.read_sync(&mut reader)?;
+        assert_eq!(heading, 0x01);
+
+        Self::read_sync(packet_header.payload_length as _, &mut reader)
+    }
+
     pub async fn read(
         payload_length: usize,
         reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
@@ -413,6 +455,15 @@ impl AuthMoreData {
         }
         reader.read_exact(&mut content).await?;
         Ok(Self(content))
+    }
+
+    pub fn read_sync(
+        payload_length: usize,
+        reader: &mut ReadCountedSync<impl Read>,
+    ) -> std::io::Result<Self> {
+        format::Bytes(payload_length - reader.read_bytes())
+            .read_sync(reader)
+            .map(Self)
     }
 }
 
@@ -441,49 +492,31 @@ impl AuthMoreDataResponse {
         }
     }
 
+    pub fn read_packet_sync(
+        reader: &mut impl Read,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let heading = format::U8.read_sync(&mut reader)?;
+
+        match heading {
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(|e| Self(Err(e), packet_header.sequence_id)),
+            0x01 => AuthMoreData::read_sync(packet_header.payload_length as _, &mut reader)
+                .map(|x| Self(Ok(x), packet_header.sequence_id)),
+            _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
+        }
+    }
+
     #[inline]
     pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
         self.0.map(|x| (x, self.1))
     }
 }
 
-pub enum HandshakeResult {
-    Ok(OKPacket),
-    Err(ErrPacket),
-}
-impl HandshakeResult {
-    pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let head_byte = reader.read_u8().await?;
-
-        match head_byte {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Err),
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Ok),
-            _ => unreachable!("unexpected handshake result payload header: 0x{head_byte:02x}"),
-        }
-    }
-
-    #[inline]
-    pub fn into_result(self) -> Result<OKPacket, ErrPacket> {
-        match self {
-            Self::Ok(o) => Ok(o),
-            Self::Err(e) => Err(e),
-        }
-    }
-}
+pub type HandshakeResult = super::GenericOKErrPacket;

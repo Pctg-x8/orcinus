@@ -8,7 +8,7 @@ async fn main() {
         .await
         .expect("Failed to connect");
     let mut stream = tokio::io::BufStream::new(stream);
-    let (sequence_id, server_handshake) = orcinus::protos::Handshake::read_packet(&mut stream)
+    let (server_handshake, sequence_id) = orcinus::protos::Handshake::read_packet(&mut stream)
         .await
         .expect("Failed to read initial handshake");
     println!("sequence id: {sequence_id}");

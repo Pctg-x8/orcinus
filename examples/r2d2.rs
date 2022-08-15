@@ -1,5 +1,3 @@
-use futures_util::TryStreamExt;
-
 #[tokio::main]
 async fn main() {
     let pool = r2d2::Pool::new(orcinus::r2d2::MysqlTcpConnection {
@@ -12,7 +10,6 @@ async fn main() {
     {
         let mut row_stream = client
             .fetch_all("Select * from test_data")
-            .await
             .expect("Failed to send query command");
 
         while let Some(r) = row_stream

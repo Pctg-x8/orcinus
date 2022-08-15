@@ -5,6 +5,8 @@ use futures_util::{future::LocalBoxFuture, FutureExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::ReadCounted;
+use crate::ReadCountedSync;
+use crate::ReadSync;
 
 use super::PacketReader;
 
@@ -14,7 +16,10 @@ pub struct PacketHeader {
     pub sequence_id: u8,
 }
 impl PacketHeader {
-    pub async fn write(self, writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
+    pub async fn write(
+        &self,
+        writer: &mut (impl AsyncWriteExt + Unpin + ?Sized),
+    ) -> std::io::Result<()> {
         writer
             .write_all(&[
                 (self.payload_length & 0xff) as u8,
@@ -23,6 +28,15 @@ impl PacketHeader {
                 self.sequence_id,
             ])
             .await
+    }
+
+    pub fn write_sync(&self, writer: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
+        writer.write_all(&[
+            (self.payload_length & 0xff) as u8,
+            ((self.payload_length >> 8) & 0xff) as _,
+            ((self.payload_length >> 16) & 0xff) as _,
+            self.sequence_id,
+        ])
     }
 }
 pub async fn write_packet(
@@ -37,6 +51,18 @@ pub async fn write_packet(
     .write(writer)
     .await?;
     writer.write_all(payload).await
+}
+pub fn write_packet_sync(
+    writer: &mut (impl Write + ?Sized),
+    payload: &[u8],
+    sequence_id: u8,
+) -> std::io::Result<()> {
+    PacketHeader {
+        payload_length: payload.len() as _,
+        sequence_id,
+    }
+    .write_sync(writer)?;
+    writer.write_all(payload)
 }
 
 pub async fn drop_packet(reader: &mut (impl PacketReader + Unpin)) -> std::io::Result<()> {
@@ -65,6 +91,14 @@ pub trait ClientPacket {
         }
         .boxed_local()
     }
+
+    fn write_packet_sync(
+        &self,
+        writer: &mut (impl Write + ?Sized),
+        sequence_id: u8,
+    ) -> std::io::Result<()> {
+        write_packet_sync(writer, &self.serialize_payload(), sequence_id)
+    }
 }
 
 #[repr(transparent)]
@@ -83,7 +117,7 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut first_byte = [0u8; 1];
         reader.read_exact(&mut first_byte)?;
 
@@ -239,6 +273,22 @@ impl OKPacket {
         .await
     }
 
+    pub fn expected_read_packet_sync(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let header = format::U8.read_sync(&mut reader)?;
+        assert_eq!(header, 0x00);
+
+        Self::read_sync(
+            packet_header.payload_length as _,
+            &mut reader,
+            client_capability,
+        )
+    }
+
     pub async fn read(
         payload_size: usize,
         reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
@@ -309,6 +359,64 @@ impl OKPacket {
         })
     }
 
+    pub fn read_sync(
+        payload_length: usize,
+        reader: &mut ReadCountedSync<impl Read>,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            affected_rows <- format::LengthEncodedInteger,
+            last_insert_id <- format::LengthEncodedInteger
+        });
+
+        let capability_extra = if client_capability.support_41_protocol() {
+            ReadSync!(reader => {
+                status_flags <- format::U16,
+                warnings <- format::U16
+            });
+
+            Some(OKPacketCapabilityExtraData::Protocol41 {
+                status_flags: StatusFlags(status_flags),
+                warnings,
+            })
+        } else if client_capability.support_transaction() {
+            let status_flags = format::U16.read_sync(reader)?;
+
+            Some(OKPacketCapabilityExtraData::Transactions {
+                status_flags: StatusFlags(status_flags),
+            })
+        } else {
+            None
+        };
+
+        let st = match capability_extra {
+            Some(OKPacketCapabilityExtraData::Protocol41 { status_flags, .. })
+            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => status_flags,
+            _ => StatusFlags::new(),
+        };
+        let (info, session_state_changes);
+        if client_capability.support_session_track() {
+            info = format::LengthEncodedString.read_sync(reader)?;
+            session_state_changes = if st.has_state_changed() {
+                Some(format::LengthEncodedString.read_sync(reader)?)
+            } else {
+                None
+            };
+        } else {
+            info = format::FixedLengthString(payload_length - reader.read_bytes())
+                .read_sync(reader)?;
+            session_state_changes = None;
+        };
+
+        Ok(Self {
+            affected_rows,
+            last_insert_id,
+            capability_extra,
+            info,
+            session_state_changes,
+        })
+    }
+
     #[inline]
     pub fn status_flags(&self) -> Option<StatusFlags> {
         match self.capability_extra {
@@ -356,6 +464,27 @@ impl ErrPacket {
             error_message: unsafe { String::from_utf8_unchecked(em_bytes) },
         })
     }
+
+    pub fn read_sync(
+        payload_size: usize,
+        reader: &mut ReadCountedSync<impl Read>,
+        client_capabilities: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let code = format::U16.read_sync(reader)?;
+        let sql_state = if client_capabilities.support_41_protocol() {
+            Some((format::U8, format::FixedBytes::<5>).read_sync(reader)?.1)
+        } else {
+            None
+        };
+        let error_message =
+            format::FixedLengthString(payload_size - reader.read_bytes()).read_sync(reader)?;
+
+        Ok(Self {
+            code,
+            sql_state,
+            error_message,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -373,10 +502,32 @@ impl EOFPacket41 {
         Self::read(reader).await
     }
 
+    pub fn expected_read_packet_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            _packet_header <- format::PacketHeader,
+            mark <- format::U8
+        });
+        assert_eq!(mark, 0xfe);
+
+        Self::read_sync(reader)
+    }
+
     pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
         Ok(Self {
             warnings: reader.read_u16_le().await?,
             status_flags: StatusFlags(reader.read_u16_le().await?),
+        })
+    }
+
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            warnings <- format::U16,
+            status_flags <- format::U16
+        });
+
+        Ok(Self {
+            warnings,
+            status_flags: StatusFlags(status_flags),
         })
     }
 }
@@ -473,6 +624,31 @@ impl GenericOKErrPacket {
         }
     }
 
+    pub fn read_packet_sync(
+        reader: &mut impl Read,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let first_byte = format::U8.read_sync(&mut reader)?;
+
+        match first_byte {
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(|x| Self(Err(x), packet_header.sequence_id)),
+            0x00 => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(|x| Self(Ok(x), packet_header.sequence_id)),
+            _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+        }
+    }
+
     #[inline]
     pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
         match self.0 {
@@ -485,6 +661,7 @@ impl GenericOKErrPacket {
 mod capabilities;
 pub use self::capabilities::*;
 mod handshake;
+use self::format::ProtocolFormatFragment;
 pub use self::handshake::*;
 mod status;
 pub use self::status::*;

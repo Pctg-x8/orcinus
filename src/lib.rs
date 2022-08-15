@@ -1,4 +1,6 @@
 mod mysql;
+use std::io::{Read, Write};
+
 use mysql::protos::drop_packet;
 use mysql::protos::CapabilityFlags;
 use mysql::protos::ClientPacket;
@@ -100,6 +102,172 @@ impl<'s> ConnectInfo<'s> {
     }
 }
 
+pub struct BlockingClient<Stream: Write> {
+    stream: Stream,
+    capability: CapabilityFlags,
+}
+impl<Stream: Write> BlockingClient<Stream> {
+    pub fn handshake(
+        mut stream: Stream,
+        connect_info: &ConnectInfo,
+    ) -> Result<Self, CommunicationError>
+    where
+        Stream: Read,
+    {
+        let (server_handshake, sequence_id) = Handshake::read_packet_sync(&mut stream)?;
+
+        let server_caps = match server_handshake {
+            Handshake::V10Long(ref p) => p.short.capability_flags,
+            Handshake::V10Short(ref p) => p.capability_flags,
+            _ => CapabilityFlags::new(),
+        };
+        let mut required_caps = CapabilityFlags::new();
+        required_caps
+            .set_support_41_protocol()
+            .set_support_secure_connection()
+            .set_use_long_password()
+            .set_support_deprecate_eof()
+            .set_client_plugin_auth()
+            .set_support_plugin_auth_lenenc_client_data();
+        if connect_info.database.is_some() {
+            required_caps.set_connect_with_db();
+        }
+        let capability = required_caps & server_caps;
+
+        let con_info = authentication::ConnectionInfo {
+            client_capabilities: capability,
+            max_packet_size: connect_info.max_packet_size,
+            character_set: connect_info.character_set,
+            username: connect_info.username,
+            password: connect_info.password,
+            database: connect_info.database,
+        };
+
+        let (auth_plugin_name, auth_data_1, auth_data_2) = match server_handshake {
+            Handshake::V10Long(ref p) => (
+                p.auth_plugin_name.as_deref(),
+                &p.short.auth_plugin_data_part_1[..],
+                p.auth_plugin_data_part_2.as_deref(),
+            ),
+            Handshake::V10Short(ref p) => (None, &p.auth_plugin_data_part_1[..], None),
+            Handshake::V9(ref p) => (None, p.scramble.as_bytes(), None),
+        };
+        match auth_plugin_name {
+            Some(x) if x == authentication::Native41::NAME => authentication::Native41 {
+                server_data_1: auth_data_1,
+                server_data_2: auth_data_2.expect("no extra data passed from server"),
+            }
+            .run_sync(&mut stream, &con_info, sequence_id + 1)?,
+            Some(x) if x == authentication::ClearText::NAME => {
+                authentication::ClearText.run_sync(&mut stream, &con_info, sequence_id + 1)?
+            }
+            Some(x) if x == authentication::SHA256::NAME => authentication::SHA256 {
+                server_spki_der: None,
+                scramble_buffer_1: auth_data_1,
+                scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+            }
+            .run_sync(&mut stream, &con_info, sequence_id + 1)?,
+            Some(x) if x == authentication::CachedSHA256::NAME => {
+                authentication::CachedSHA256(authentication::SHA256 {
+                    server_spki_der: None,
+                    scramble_buffer_1: auth_data_1,
+                    scramble_buffer_2: auth_data_2.unwrap_or(&[]),
+                })
+                .run_sync(&mut stream, &con_info, sequence_id + 1)?
+            }
+            Some(x) => unreachable!("unknown auth plugin: {x}"),
+            None => unreachable!("auth plugin is not specified"),
+        };
+
+        Ok(unsafe { Self::new(stream, capability) })
+    }
+
+    /// this function does not perform handshaking. user must be done the operation.
+    pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
+        Self {
+            stream: stream,
+            capability,
+        }
+    }
+
+    pub fn quit(&mut self) -> std::io::Result<()> {
+        QuitCommand.write_packet_sync(&mut self.stream, 0)
+    }
+
+    pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
+    where
+        Stream: Read,
+    {
+        QueryCommand(query).write_packet_sync(&mut self.stream, 0)?;
+        self.stream.flush()?;
+        QueryCommandResponse::read_packet_sync(&mut self.stream, self.capability)
+    }
+
+    pub fn fetch_all<'s>(
+        &'s mut self,
+        query: &'s str,
+    ) -> Result<TextResultsetStream<'s, Stream>, CommunicationError>
+    where
+        Stream: Read,
+    {
+        match self.query(query)? {
+            QueryCommandResponse::Resultset { column_count } => self
+                .text_resultset_stream(column_count as _)
+                .map_err(From::from),
+            QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
+            QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
+            QueryCommandResponse::LocalInfileRequest { filename } => {
+                todo!("local infile request: {filename}")
+            }
+        }
+    }
+
+    pub fn text_resultset_stream(
+        &mut self,
+        column_count: usize,
+    ) -> std::io::Result<TextResultsetStream<Stream>>
+    where
+        Stream: Read,
+    {
+        todo!("Text Resultset Stream")
+        // TextResultsetStream::new_sync(&mut self.stream, column_count, self.capability)
+    }
+
+    pub fn binary_resultset_stream(
+        &mut self,
+        column_count: usize,
+    ) -> std::io::Result<BinaryResultsetStream<Stream>>
+    where
+        Stream: Read,
+    {
+        todo!("Binary Resultset Stream")
+        // BinaryResultsetStream::new_sync(&mut self.stream, self.capability, column_count)
+    }
+}
+impl<Stream: Write> Drop for BlockingClient<Stream> {
+    fn drop(&mut self) {
+        self.quit().expect("Failed to send quit packet at drop")
+    }
+}
+impl BlockingClient<std::net::TcpStream> {
+    pub fn into_async(self) -> Client<tokio::io::BufStream<tokio::net::TcpStream>> {
+        let stream = unsafe { std::ptr::read(&self.stream as *const std::net::TcpStream) };
+        let capability = self.capability;
+        std::mem::forget(self);
+
+        stream
+            .set_nonblocking(true)
+            .expect("Failed to switch blocking mode");
+
+        Client {
+            stream: tokio::io::BufStream::new(
+                tokio::net::TcpStream::from_std(stream).expect("Failed to wrap std stream"),
+            ),
+            capability,
+        }
+    }
+}
+
 pub struct Client<Stream: AsyncWriteExt + Unpin> {
     stream: Stream,
     capability: CapabilityFlags,
@@ -112,9 +280,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
     where
         Stream: PacketReader,
     {
-        let (sequence_id, server_handshake) = Handshake::read_packet(&mut stream)
-            .await
-            .expect("Failed to read initial handshake");
+        let (server_handshake, sequence_id) = Handshake::read_packet(&mut stream).await?;
 
         let server_caps = match server_handshake {
             Handshake::V10Long(ref p) => p.short.capability_flags,
