@@ -38,6 +38,14 @@ impl PacketHeader {
             self.sequence_id,
         ])
     }
+
+    #[inline]
+    pub fn from_fixed_bytes(bytes: [u8; 4]) -> Self {
+        Self {
+            payload_length: u32::from_le_bytes(bytes) & 0x00ff_ffff,
+            sequence_id: bytes[3]
+        }
+    }
 }
 pub async fn write_packet(
     writer: &mut (impl AsyncWriteExt + Unpin),

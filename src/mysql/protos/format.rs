@@ -2,15 +2,21 @@
 
 use std::{io::Read, pin::Pin};
 
-use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use futures_util::{future::LocalBoxFuture, FutureExt, TryFutureExt};
+use tokio::io::AsyncRead;
 
-pub trait ProtocolFormatFragment<'r, R> {
+use crate::ReadNullTerminatedString;
+
+pub trait ProtocolFormatFragment {
     type Output;
-    type ReaderF: 'r + std::future::Future<Output = std::io::Result<Self::Output>>;
 
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output>;
-    fn read(self, reader: &'r mut R) -> Self::ReaderF;
+}
+
+pub trait AsyncProtocolFormatFragment<'r, R: 'r + ?Sized>: ProtocolFormatFragment {
+    type ReaderF: 'r + std::future::Future<Output = std::io::Result<Self::Output>>;
+
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF;
 }
 
 // TODO: ほんとうはassociated constでもちたい
@@ -40,50 +46,35 @@ pub struct ReadF<const N: usize, R, RP: ByteRepresentation<N>> {
     reader: R,
     buf: [u8; N],
     read_bytes: usize,
+    _ph: std::marker::PhantomData<RP>,
 }
 impl<const N: usize, R, RP: ByteRepresentation<N>> ReadF<N, R, RP> {
     fn new(reader: R) -> Self {
         Self {
             reader,
-            buf: [0; 1],
+            buf: [0; N],
             read_bytes: 0,
+            _ph: std::marker::PhantomData,
         }
     }
 }
-impl<const N: usize, R, RP: ByteRepresentation<N>> std::future::Future for ReadF<N, R, RP>
+impl<const N: usize, R, RP: ByteRepresentation<N> + Unpin> std::future::Future for ReadF<N, R, RP>
 where
     R: AsyncRead + Unpin,
 {
-    type Output = std::io::Result<u8>;
+    type Output = std::io::Result<RP>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        while self.read_bytes < N {
-            let mut buf = tokio::io::ReadBuf::new(&mut self.buf[self.read_bytes..]);
+        let this = self.get_mut();
 
-            match Pin::new(&mut self.reader).poll_read(cx, &mut buf) {
-                std::task::Poll::Pending => {
-                    return std::task::Poll::Pending;
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    return std::task::Poll::Ready(Err(e));
-                }
-                std::task::Poll::Ready(_) => {
-                    let r = buf.filled().len();
-                    if r == 0 {
-                        return std::task::Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "",
-                        )));
-                    }
-                    self.read_bytes += buf.filled().len();
-                }
-            }
+        match poll_read_until(&mut this.reader, cx, &mut this.buf, &mut this.read_bytes) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+            std::task::Poll::Ready(_) => std::task::Poll::Ready(Ok(RP::from_le(this.buf))),
         }
-
-        std::task::Poll::Ready(Ok(RP::form_le(self.buf)))
     }
 }
 
@@ -107,17 +98,20 @@ impl<R> std::future::Future for ReadLengthEncodedIntegerF<R>
 where
     R: AsyncRead + Unpin,
 {
-    type Output = std::io::Result<u8>;
+    type Output = std::io::Result<u64>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let first_byte = match self.first_byte {
+        let this = self.get_mut();
+
+        let first_byte = match this.first_byte {
             Some(v) => v,
             None => {
-                let mut buf = tokio::io::ReadBuf::new(&mut [0u8; 1]);
-                match Pin::new(&mut self.reader).poll_read(cx, &mut buf) {
+                let mut buf = [0u8; 1];
+                let mut buf = tokio::io::ReadBuf::new(&mut buf);
+                match Pin::new(&mut this.reader).poll_read(cx, &mut buf) {
                     std::task::Poll::Pending => {
                         return std::task::Poll::Pending;
                     }
@@ -131,7 +125,7 @@ where
                                 std::io::ErrorKind::UnexpectedEof.into()
                             ));
                         }
-                        self.first_byte = Some(filled[0]);
+                        this.first_byte = Some(filled[0]);
                         filled[0]
                     }
                 }
@@ -139,54 +133,45 @@ where
         };
 
         match first_byte {
-            x if x < 251 => std::task::Poll::Ready(x as _),
+            x if x < 251 => std::task::Poll::Ready(Ok(x as _)),
             0xfc => match poll_read_until(
-                Pin::new(&mut self.reader),
+                &mut this.reader,
                 cx,
-                &mut self.extra_bytes[..2],
-                &mut self.extra_read_bytes,
+                &mut this.extra_bytes[..2],
+                &mut this.extra_read_bytes,
             ) {
-                std::task::Poll::Pending => {
-                    return std::task::Poll::Pending;
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    return std::task::Poll::Ready(Err(e));
-                }
-                std::task::Poll::Ready(_) => {
-                    std::task::Poll::Ready(Ok(u16::from_le_bytes(self.extra_bytes[..2]) as _))
-                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Ready(_) => std::task::Poll::Ready(Ok(u16::from_le_bytes([
+                    this.extra_bytes[0],
+                    this.extra_bytes[1],
+                ]) as _)),
             },
             0xfd => match poll_read_until(
-                Pin::new(&mut self.reader),
+                &mut this.reader,
                 cx,
-                &mut self.extra_bytes[..3],
-                &mut self.extra_read_bytes,
+                &mut this.extra_bytes[..3],
+                &mut this.extra_read_bytes,
             ) {
-                std::task::Poll::Pending => {
-                    return std::task::Poll::Pending;
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    return std::task::Poll::Ready(Err(e));
-                }
-                std::task::Poll::Ready(_) => {
-                    self.extra_bytes[3] = 0x00;
-                    std::task::Poll::Ready(Ok(u32::from_le_bytes(self.extra_bytes[..4]) as _))
-                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Ready(_) => std::task::Poll::Ready(Ok(u32::from_le_bytes([
+                    this.extra_bytes[0],
+                    this.extra_bytes[1],
+                    this.extra_bytes[2],
+                    0x00,
+                ]) as _)),
             },
             0xfe => match poll_read_until(
-                Pin::new(&mut self.reader),
+                &mut this.reader,
                 cx,
-                &mut self.extra_bytes,
-                &mut self.extra_read_bytes,
+                &mut this.extra_bytes,
+                &mut this.extra_read_bytes,
             ) {
-                std::task::Poll::Pending => {
-                    return std::task::Poll::Pending;
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    return std::task::Poll::Ready(Err(e));
-                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
                 std::task::Poll::Ready(_) => {
-                    std::task::Poll::Ready(Ok(u16::from_le_bytes(self.extra_bytes) as _))
+                    std::task::Poll::Ready(Ok(u64::from_le_bytes(this.extra_bytes)))
                 }
             },
             _ => unreachable!("unknown length encoded integer prefix: 0x{first_byte:02x}"),
@@ -196,31 +181,85 @@ where
 
 pub struct ReadFixedBytesF<const N: usize, R> {
     reader: R,
-    buf: [u8; N],
+    buf: Option<[u8; N]>,
     read_bytes: usize,
 }
 impl<const N: usize, R> ReadFixedBytesF<N, R> {
     fn new(reader: R) -> Self {
         Self {
             reader,
-            buf: [0u8; N],
+            buf: Some([0u8; N]),
             read_bytes: 0,
         }
     }
 }
-impl<const N: usize, R: AsyncRead + Unpin> std:::future::Future for ReadFixedBytesF<N, R> {
-    type Output = std::io::Result<>;
+impl<const N: usize, R: AsyncRead + Unpin> std::future::Future for ReadFixedBytesF<N, R> {
+    type Output = std::io::Result<[u8; N]>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let buf = this.buf.as_mut().expect("Future was resolved");
+
+        match poll_read_until(&mut this.reader, cx, buf, &mut this.read_bytes) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+            std::task::Poll::Ready(_) => {
+                std::task::Poll::Ready(Ok(unsafe { this.buf.take().unwrap_unchecked() }))
+            }
+        }
+    }
+}
+
+pub struct ReadBytes<R> {
+    reader: R,
+    buf: Vec<u8>,
+    read_bytes: usize,
+}
+impl<R> ReadBytes<R> {
+    fn new(reader: R, required_bytes: usize) -> Self {
+        let mut buf = Vec::with_capacity(required_bytes);
+        unsafe { buf.set_len(required_bytes) };
+
+        Self {
+            reader,
+            buf,
+            read_bytes: 0,
+        }
+    }
+}
+impl<R: AsyncRead + Unpin> std::future::Future for ReadBytes<R> {
+    type Output = std::io::Result<Vec<u8>>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+
+        match poll_read_until(&mut this.reader, cx, &mut this.buf, &mut this.read_bytes) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+            std::task::Poll::Ready(_) => {
+                let r = std::mem::replace(&mut this.buf, Vec::new());
+                this.read_bytes = 0;
+                std::task::Poll::Ready(Ok(r))
+            }
+        }
+    }
 }
 
 fn poll_read_until(
-    reader: Pin<&mut (impl AsyncRead + Unpin + ?Sized)>,
+    mut reader: &mut (impl AsyncRead + Unpin + ?Sized),
     cx: &mut std::task::Context,
     buf: &mut [u8],
     filled_bytes: &mut usize,
 ) -> std::task::Poll<std::io::Result<()>> {
     while *filled_bytes < buf.len() {
         let mut buf = tokio::io::ReadBuf::new(&mut buf[*filled_bytes..]);
-        match reader.poll_read(cx, &mut buf) {
+        match Pin::new(&mut reader).poll_read(cx, &mut buf) {
             std::task::Poll::Pending => {
                 return std::task::Poll::Pending;
             }
@@ -232,7 +271,7 @@ fn poll_read_until(
                 if filled.len() == 0 {
                     return std::task::Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()));
                 }
-                filled_bytes += filled.len();
+                *filled_bytes += filled.len();
             }
         }
     }
@@ -241,9 +280,8 @@ fn poll_read_until(
 }
 
 pub struct U8;
-impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U8 {
+impl ProtocolFormatFragment for U8 {
     type Output = u8;
-    type ReaderF = ReadF<1, &'r mut R, u8>;
 
     #[inline]
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
@@ -251,17 +289,19 @@ impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U8 {
         reader.read_exact(&mut b)?;
         Ok(b[0])
     }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U8 {
+    type ReaderF = ReadF<1, &'r mut R, u8>;
 
     #[inline]
-    fn read(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
         ReadF::new(reader)
     }
 }
 
 pub struct U16;
-impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U16 {
+impl ProtocolFormatFragment for U16 {
     type Output = u16;
-    type ReaderF = ReadF<2, &'r mut R, u16>;
 
     #[inline]
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
@@ -269,17 +309,19 @@ impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U16 {
         reader.read_exact(&mut b)?;
         Ok(u16::from_le_bytes(b))
     }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U16 {
+    type ReaderF = ReadF<2, &'r mut R, u16>;
 
     #[inline]
-    fn read(self, reader: &'r mut R) -> Self::ReaderF {
-        reader.read_u16_le().boxed_local()
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadF::new(reader)
     }
 }
 
 pub struct U32;
-impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U32 {
+impl ProtocolFormatFragment for U32 {
     type Output = u32;
-    type ReaderF = ReadF<4, &'r mut R, u32>;
 
     #[inline]
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
@@ -287,25 +329,32 @@ impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for U32 {
         reader.read_exact(&mut b)?;
         Ok(u32::from_le_bytes(b))
     }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U32 {
+    type ReaderF = ReadF<4, &'r mut R, u32>;
 
     #[inline]
-    fn read(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
         ReadF::new(reader)
     }
 }
 
 pub struct LengthEncodedInteger;
-impl<'r, R: AsyncRead + Unpin> ProtocolFormatFragment<'r, R> for LengthEncodedInteger {
+impl ProtocolFormatFragment for LengthEncodedInteger {
     type Output = u64;
-    type ReaderF = ReadLengthEncodedIntegerF<&'r mut R>;
 
     #[inline]
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
         super::LengthEncodedInteger::read_sync(reader).map(|x| x.0)
     }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+    for LengthEncodedInteger
+{
+    type ReaderF = ReadLengthEncodedIntegerF<&'r mut R>;
 
     #[inline]
-    fn read(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
         ReadLengthEncodedIntegerF::new(reader)
     }
 }
@@ -321,6 +370,16 @@ impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
         Ok(b)
     }
 }
+impl<'r, const L: usize, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+    for FixedBytes<L>
+{
+    type ReaderF = ReadFixedBytesF<L, &'r mut R>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadFixedBytesF::new(reader)
+    }
+}
 
 pub struct Bytes(pub usize);
 impl ProtocolFormatFragment for Bytes {
@@ -334,6 +393,14 @@ impl ProtocolFormatFragment for Bytes {
         }
         reader.read_exact(&mut b)?;
         Ok(b)
+    }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for Bytes {
+    type ReaderF = ReadBytes<&'r mut R>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadBytes::new(reader, self.0)
     }
 }
 
@@ -356,6 +423,16 @@ impl ProtocolFormatFragment for NullTerminatedString {
         }
     }
 }
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+    for NullTerminatedString
+{
+    type ReaderF = ReadNullTerminatedString<&'r mut R>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadNullTerminatedString::new(reader)
+    }
+}
 
 pub struct FixedLengthString(pub usize);
 impl ProtocolFormatFragment for FixedLengthString {
@@ -371,6 +448,19 @@ impl ProtocolFormatFragment for FixedLengthString {
         Ok(unsafe { String::from_utf8_unchecked(b) })
     }
 }
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+    for FixedLengthString
+{
+    type ReaderF = futures_util::future::MapOk<ReadBytes<&'r mut R>, fn(Vec<u8>) -> String>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadBytes::new(reader, self.0).map_ok(unsafe_recover_string_from_u8s)
+    }
+}
+fn unsafe_recover_string_from_u8s(v: Vec<u8>) -> String {
+    unsafe { String::from_utf8_unchecked(v) }
+}
 
 pub struct LengthEncodedString;
 impl ProtocolFormatFragment for LengthEncodedString {
@@ -380,6 +470,22 @@ impl ProtocolFormatFragment for LengthEncodedString {
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
         let len = LengthEncodedInteger.read_sync(reader)?;
         FixedLengthString(len as _).read_sync(reader)
+    }
+}
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for LengthEncodedString
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    // TODO: できればBoxつかいたくない
+    type ReaderF = LocalBoxFuture<'r, std::io::Result<String>>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        async move {
+            let len = LengthEncodedInteger.read_format(reader).await?;
+            FixedLengthString(len as _).read_format(reader).await
+        }
+        .boxed_local()
     }
 }
 
@@ -392,10 +498,18 @@ impl ProtocolFormatFragment for PacketHeader {
         let mut ph = [0u8; 4];
         reader.read_exact(&mut ph)?;
 
-        Ok(super::PacketHeader {
-            payload_length: u32::from_le_bytes(ph) & 0x00ff_ffff,
-            sequence_id: ph[3],
-        })
+        Ok(super::PacketHeader::from_fixed_bytes(ph))
+    }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for PacketHeader {
+    type ReaderF = futures_util::future::MapOk<
+        ReadFixedBytesF<4, &'r mut R>,
+        fn([u8; 4]) -> super::PacketHeader,
+    >;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadFixedBytesF::new(reader).map_ok(super::PacketHeader::from_fixed_bytes)
     }
 }
 
@@ -410,6 +524,24 @@ macro_rules! ProtocolFormatFragmentGroup {
                 $(let $a = self.$n.read_sync(reader)?;)+
 
                 Ok(($($a),+))
+            }
+        }
+        impl<'r, Reader, $($a),+> AsyncProtocolFormatFragment<'r, Reader> for ($($a),+)
+        where
+            Reader: AsyncRead + Unpin + ?Sized + 'r,
+            $($a: AsyncProtocolFormatFragment<'r, Reader>,)+
+            $($a: 'static,)+
+        {
+            type ReaderF = LocalBoxFuture<'r, std::io::Result<($($a::Output),+)>>;
+
+            #[inline]
+            fn read_format(self, reader: &'r mut Reader) -> Self::ReaderF {
+                async move {
+                    #![allow(non_snake_case)]
+                    $(let $a = self.$n.read_format(unsafe { std::ptr::read(&reader) }).await?;)+
+
+                    Ok(($($a),+))
+                }.boxed_local()
             }
         }
     }
@@ -446,5 +578,13 @@ macro_rules! ReadSync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
         #[allow(unused_parens)]
         let ($($val),*) = ($($fmt),*).read_sync($reader)?;
+    }
+}
+
+#[macro_export]
+macro_rules! ReadAsync {
+    ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
+        #[allow(unused_parens)]
+        let ($($val),*) = ($($fmt),*).read_format($reader).await?;
     }
 }

@@ -22,6 +22,14 @@ pub struct ReadNullTerminatedString<R> {
     reader: R,
     collected: Vec<u8>,
 }
+impl<R> ReadNullTerminatedString<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            collected: Vec::new(),
+        }
+    }
+}
 impl<R> std::future::Future for ReadNullTerminatedString<R>
 where
     R: AsyncReadExt + Unpin,
