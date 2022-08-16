@@ -75,6 +75,12 @@ pub async fn drop_packet(reader: &mut (impl PacketReader + Unpin)) -> std::io::R
 
     Ok(())
 }
+pub fn drop_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<()> {
+    let header = format::PacketHeader.read_sync(reader)?;
+    let _discard = format::Bytes(header.payload_length as _).read_sync(reader)?;
+
+    Ok(())
+}
 
 pub trait ClientPacket {
     fn serialize_payload(&self) -> Vec<u8>;
@@ -502,7 +508,7 @@ impl EOFPacket41 {
         Self::read(reader).await
     }
 
-    pub fn expected_read_packet_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    pub fn expected_read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         ReadSync!(reader => {
             _packet_header <- format::PacketHeader,
             mark <- format::U8

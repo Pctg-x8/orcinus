@@ -4,9 +4,10 @@ use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::{PacketReader, ReadCounted};
+use crate::{PacketReader, ReadCounted, ReadCountedSync};
 
 use super::{
+    format::{self, ProtocolFormatFragment},
     CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket, Value,
 };
 
@@ -336,6 +337,20 @@ impl BinaryResultsetRow {
         })
     }
 
+    pub fn read_sync(
+        payload_length: usize,
+        column_count: usize,
+        reader: &mut ReadCountedSync<impl Read>,
+    ) -> std::io::Result<Self> {
+        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8).read_sync(reader)?;
+        let values = format::Bytes(payload_length - reader.read_bytes()).read_sync(reader)?;
+
+        Ok(Self {
+            null_bitmap,
+            values,
+        })
+    }
+
     #[inline]
     pub fn decode_values<'r, 'cs>(
         &'r self,
@@ -427,6 +442,45 @@ impl BinaryResultset41 {
             .await
             .map(Self::Row),
             _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{r1:02x}"),
+        }
+    }
+
+    pub fn read_packet_sync(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+        column_count: usize,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_byte = format::U8.read_sync(&mut reader)?;
+
+        match head_byte {
+            0xfe if !client_capability.support_deprecate_eof() => {
+                EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF)
+            }
+            // treat as OK Packet for client supports DEPRECATE_EOF capability
+            0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Ok),
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Err),
+            // 0x00 is a normal resultset row in binary protocol(terminal packet is OK packet started with 0xfe)
+            0x00 => BinaryResultsetRow::read_sync(
+                packet_header.payload_length as _,
+                column_count,
+                &mut reader,
+            )
+            .map(Self::Row),
+            _ => unreachable!(
+                "invalid heading byte for binary protocol resultset: 0x{head_byte:02x}"
+            ),
         }
     }
 }

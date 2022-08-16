@@ -4,10 +4,11 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     protos::{
-        format::{self, ProtocolFormatFragment}, read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
+        format::{self, ProtocolFormatFragment},
+        read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
         InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
     },
-    PacketReader, ReadCounted, ReadCountedSync,
+    PacketReader, ReadCounted, ReadCountedSync, ReadSync,
 };
 
 pub struct QueryCommand<'s>(pub &'s str);
@@ -163,11 +164,58 @@ impl ColumnDefinition41 {
         })
     }
 
+    pub fn read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            _packet_header <- format::PacketHeader,
+            catalog <- format::LengthEncodedString,
+            schema <- format::LengthEncodedString,
+            table <- format::LengthEncodedString,
+            org_table <- format::LengthEncodedString,
+            name <- format::LengthEncodedString,
+            org_name <- format::LengthEncodedString,
+            _fixed_length_fields_len <- format::LengthEncodedInteger,
+            character_set <- format::U16,
+            column_length <- format::U32,
+            type_byte <- format::U8,
+            flags <- format::U16,
+            decimals <- format::U8,
+            _filler <- format::FixedBytes::<2>
+        });
+        assert_eq!(_fixed_length_fields_len, 0x0c);
+
+        Ok(Self {
+            catalog,
+            schema,
+            table,
+            org_table,
+            name,
+            org_name,
+            character_set,
+            column_length,
+            type_byte,
+            flags,
+            decimals,
+            default_values: None,
+        })
+    }
+
     pub async fn read_packet_for_field_list(
         reader: &mut (impl PacketReader + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         let org = Self::read_packet(reader).await?;
         let default_values = read_lenenc_str(reader).await?;
+
+        Ok(Self {
+            default_values: Some(default_values),
+            ..org
+        })
+    }
+
+    pub fn read_packet_for_field_list_sync(
+        reader: &mut (impl Read + ?Sized),
+    ) -> std::io::Result<Self> {
+        let org = Self::read_packet_sync(reader)?;
+        let default_values = format::LengthEncodedString.read_sync(reader)?;
 
         Ok(Self {
             default_values: Some(default_values),
@@ -291,6 +339,43 @@ impl Resultset41 {
                 reader.read_exact(&mut contents[1..]).await?;
                 Ok(Self::Row(ResultsetRow(contents)))
             }
+        }
+    }
+
+    pub fn read_packet_sync(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_byte = format::U8.read_sync(&mut reader)?;
+
+        match head_byte {
+            0xfe if !client_capability.support_deprecate_eof() => {
+                EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF)
+            }
+            // treat as OK Packet for client supports DEPRECATE_EOF capability
+            0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Ok),
+            0x00 => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Ok),
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Err),
+            _ => format::Bytes(packet_header.payload_length as _)
+                .read_sync(reader.into_inner())
+                .map(|x| Self::Row(ResultsetRow(x))),
         }
     }
 }

@@ -1,8 +1,11 @@
+use std::io::Read;
+
 use tokio::io::AsyncReadExt;
 
-use crate::{PacketReader, ReadCounted};
+use crate::{PacketReader, ReadCounted, ReadCountedSync, ReadSync};
 
 use super::{
+    format::{self, ProtocolFormatFragment},
     serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
     LengthEncodedInteger, OKPacket, Value,
 };
@@ -119,6 +122,23 @@ impl StmtPrepareOk {
             warning_count,
         })
     }
+
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        ReadSync!(reader => {
+            statement_id <- format::U32,
+            num_columns <- format::U16,
+            num_params <- format::U16,
+            _filler <- format::FixedBytes::<1>,
+            warning_count <- format::U16
+        });
+
+        Ok(Self {
+            statement_id,
+            num_columns,
+            num_params,
+            warning_count,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +164,26 @@ impl StmtPrepareResult {
             .await
             .map(Self::Err),
             0x00 => StmtPrepareOk::read(reader.into_inner()).await.map(Self::Ok),
+            _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
+        }
+    }
+
+    pub fn read_packet_sync(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let first_byte = format::U8.read_sync(&mut reader)?;
+
+        match first_byte {
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Err),
+            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(Self::Ok),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -192,6 +232,33 @@ impl StmtExecuteResult {
                     LengthEncodedInteger::read_ahead(r1, reader.into_inner()).await?;
                 Ok(Self::Resultset { column_count })
             }
+        }
+    }
+
+    pub fn read_packet_sync(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_byte = format::U8.read_sync(&mut reader)?;
+
+        match head_byte {
+            0x00 => OKPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Ok),
+            0xff => ErrPacket::read_sync(
+                packet_header.payload_length as _,
+                &mut reader,
+                client_capability,
+            )
+            .map(Self::Err),
+            _ => format::LengthEncodedInteger
+                .read_sync(reader.into_inner())
+                .map(|x| Self::Resultset { column_count: x }),
         }
     }
 }
