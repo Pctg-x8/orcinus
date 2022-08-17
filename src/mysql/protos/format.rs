@@ -13,7 +13,11 @@ pub trait ProtocolFormatFragment {
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output>;
 
     #[inline]
-    fn map<F, R>(self, mapper: F) -> Mapped<Self, F> where Self: Sized, F: FnOnce(Self::Output) -> R {
+    fn map<F, R>(self, mapper: F) -> Mapped<Self, F>
+    where
+        Self: Sized,
+        F: FnOnce(Self::Output) -> R,
+    {
         Mapped(self, mapper)
     }
 }
@@ -94,6 +98,15 @@ impl<R> ReadLengthEncodedIntegerF<R> {
         Self {
             reader,
             first_byte: None,
+            extra_bytes: [0u8; 8],
+            extra_read_bytes: 0,
+        }
+    }
+
+    fn new_ahead(first_byte: u8, reader: R) -> Self {
+        Self {
+            reader,
+            first_byte: Some(first_byte),
             extra_bytes: [0u8; 8],
             extra_read_bytes: 0,
         }
@@ -364,6 +377,26 @@ impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
     }
 }
 
+pub struct LengthEncodedIntegerAhead(pub u8);
+impl ProtocolFormatFragment for LengthEncodedIntegerAhead {
+    type Output = u64;
+
+    #[inline]
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+        super::LengthEncodedInteger::read_ahead_sync(self.0, reader).map(|x| x.0)
+    }
+}
+impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+    for LengthEncodedIntegerAhead
+{
+    type ReaderF = ReadLengthEncodedIntegerF<&'r mut R>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadLengthEncodedIntegerF::new_ahead(self.0, reader)
+    }
+}
+
 pub struct FixedBytes<const L: usize>;
 impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
     type Output = [u8; L];
@@ -535,7 +568,7 @@ where
     PF: AsyncProtocolFormatFragment<'r, R>,
     F: FnOnce(<PF as ProtocolFormatFragment>::Output) -> Ret,
     R: AsyncRead + Unpin + ?Sized + 'r,
-    F: 'r
+    F: 'r,
 {
     type ReaderF = futures_util::future::MapOk<PF::ReaderF, F>;
 

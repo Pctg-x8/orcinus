@@ -102,7 +102,8 @@ impl QueryCommandResponse {
                 Ok(Self::LocalInfileRequest { filename })
             }
             _ => {
-                let column_count = format::LengthEncodedInteger.read_sync(reader.into_inner())?;
+                let column_count =
+                    format::LengthEncodedIntegerAhead(head_value).read_sync(reader.into_inner())?;
 
                 Ok(Self::Resultset { column_count })
             }
@@ -373,9 +374,15 @@ impl Resultset41 {
                 client_capability,
             )
             .map(Self::Err),
-            _ => format::Bytes(packet_header.payload_length as _)
-                .read_sync(reader.into_inner())
-                .map(|x| Self::Row(ResultsetRow(x))),
+            _ => {
+                let mut contents = Vec::with_capacity(packet_header.payload_length as _);
+                unsafe {
+                    contents.set_len(packet_header.payload_length as _);
+                }
+                contents[0] = head_byte;
+                reader.read_exact(&mut contents[1..])?;
+                Ok(Self::Row(ResultsetRow(contents)))
+            }
         }
     }
 }

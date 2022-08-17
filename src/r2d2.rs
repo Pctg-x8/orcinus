@@ -22,7 +22,9 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
         super::BlockingClient::handshake(stream, &self.con_info)
     }
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        conn.query("Select 1").map(|_| ()).map_err(From::from)
+        conn.fetch_all("Select 1")
+            .map_err(From::from)
+            .and_then(|mut s| s.drop_all_rows())
     }
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
         self.is_valid(conn).is_err()

@@ -88,6 +88,14 @@ where
             _ => false,
         }
     }
+
+    pub fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
+        while let Some(r) = self.next() {
+            let _ = r?;
+        }
+
+        Ok(())
+    }
 }
 impl<R> Iterator for TextResultsetIterator<R>
 where

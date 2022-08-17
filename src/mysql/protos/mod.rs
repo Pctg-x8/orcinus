@@ -43,7 +43,7 @@ impl PacketHeader {
     pub fn from_fixed_bytes(bytes: [u8; 4]) -> Self {
         Self {
             payload_length: u32::from_le_bytes(bytes) & 0x00ff_ffff,
-            sequence_id: bytes[3]
+            sequence_id: bytes[3],
         }
     }
 }
@@ -134,9 +134,15 @@ impl LengthEncodedInteger {
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut first_byte = [0u8; 1];
         reader.read_exact(&mut first_byte)?;
+        Self::read_ahead_sync(first_byte[0], reader)
+    }
 
-        match first_byte[0] {
-            x if x < 251 => Ok(Self(first_byte[0] as _)),
+    pub fn read_ahead_sync(
+        first_byte: u8,
+        reader: &mut (impl Read + ?Sized),
+    ) -> std::io::Result<Self> {
+        match first_byte {
+            x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => {
                 let mut value = [0u8; 2];
                 reader.read_exact(&mut value)?;
@@ -152,7 +158,7 @@ impl LengthEncodedInteger {
                 reader.read_exact(&mut value)?;
                 Ok(Self(u64::from_le_bytes(value)))
             }
-            _ => unreachable!("0x{:02x}", first_byte[0]),
+            _ => unreachable!("invalid lenenc heading: 0x{first_byte:02x}"),
         }
     }
 
