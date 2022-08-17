@@ -1,5 +1,3 @@
-use super::super::PacketReader;
-
 /// https://dev.mysql.com/doc/internals/en/capability-flags.html#packet-Protocol::CapabilityFlags
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -9,24 +7,12 @@ impl CapabilityFlags {
         Self(0)
     }
 
+    pub const fn from_lower_bits(lb: u16) -> Self {
+        Self(lb as _)
+    }
+
     pub const fn combine_upper_bytes(self, ub: u16) -> Self {
         Self(self.0 & 0xffff | ((ub as u32) << 16))
-    }
-
-    pub async fn read_lower_bits(
-        reader: &mut (impl PacketReader + Unpin),
-    ) -> std::io::Result<Self> {
-        reader.read_u16_le().await.map(|x| Self(x as _))
-    }
-
-    pub async fn additional_read_upper_bits(
-        self,
-        reader: &mut (impl PacketReader + Unpin),
-    ) -> std::io::Result<Self> {
-        reader
-            .read_u16_le()
-            .await
-            .map(|x| Self((x as u32) << 16 | self.0))
     }
 
     pub fn use_long_password(&self) -> bool {

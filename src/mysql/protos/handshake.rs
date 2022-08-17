@@ -3,9 +3,9 @@ use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::protos::format::{ProtocolFormatFragment, AsyncProtocolFormatFragment};
+use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
-use crate::{ReadAsync, ReadCountedSync, ReadSync};
+use crate::{DefFormatStruct, DefProtocolFormat, ReadAsync, ReadCountedSync, ReadSync};
 
 use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
@@ -18,39 +18,35 @@ pub struct HandshakeV10Short {
     pub auth_plugin_data_part_1: [u8; 8],
     pub capability_flags: CapabilityFlags,
 }
+DefFormatStruct!(RawHandshakeV10Short(RawHandshakeV10ShortProtocolFormat) {
+    server_version(String) <- format::NullTerminatedString,
+    connection_id(u32) <- format::U32,
+    auth_plugin_data_part_1([u8; 8]) <- format::FixedBytes::<8>,
+    _filler([u8; 1]) <- format::FixedBytes::<1>,
+    capability_flags(CapabilityFlags) <- format::U16.map(CapabilityFlags::from_lower_bits)
+});
+impl From<RawHandshakeV10Short> for HandshakeV10Short {
+    fn from(raw: RawHandshakeV10Short) -> Self {
+        Self {
+            server_version: raw.server_version,
+            connection_id: raw.connection_id,
+            auth_plugin_data_part_1: raw.auth_plugin_data_part_1,
+            capability_flags: raw.capability_flags,
+        }
+    }
+}
 impl HandshakeV10Short {
     pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
-        ReadAsync!(reader => {
-            server_version <- format::NullTerminatedString,
-            connection_id <- format::U32,
-            auth_plugin_data_part_1 <- format::FixedBytes::<8>,
-            _filler <- format::FixedBytes::<1>,
-            capability_flags <- format::U16
-        });
-
-        Ok(Self {
-            server_version,
-            connection_id,
-            auth_plugin_data_part_1,
-            capability_flags: CapabilityFlags(capability_flags as _),
-        })
+        RawHandshakeV10ShortProtocolFormat
+            .read_format(reader)
+            .await
+            .map(From::from)
     }
 
     pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        ReadSync!(reader => {
-            server_version <- format::NullTerminatedString,
-            connection_id <- format::U32,
-            auth_plugin_data_part_1 <- format::FixedBytes::<8>,
-            _filler <- format::FixedBytes::<1>,
-            capability_flags <- format::U16
-        });
-
-        Ok(Self {
-            server_version,
-            connection_id,
-            auth_plugin_data_part_1,
-            capability_flags: CapabilityFlags(capability_flags as _),
-        })
+        RawHandshakeV10ShortProtocolFormat
+            .read_sync(reader)
+            .map(From::from)
     }
 }
 
@@ -62,24 +58,31 @@ pub struct HandshakeV10Long {
     pub auth_plugin_data_part_2: Option<Vec<u8>>,
     pub auth_plugin_name: Option<String>,
 }
+DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
+    character_set(u8) <- format::U8,
+    status_flags(u16) <- format::U16,
+    capability_flags_upper_bits(u16) <- format::U16,
+    auth_plugin_data_length(u8) <- format::U8,
+    _filler([u8; 10]) <- format::FixedBytes::<10>
+});
 impl HandshakeV10Long {
     pub async fn read_additional(
         short: HandshakeV10Short,
         reader: &mut (impl AsyncReadExt + Unpin),
     ) -> std::io::Result<Self> {
-        ReadAsync!(reader => {
-            character_set <- format::U8,
-            status_flags <- format::U16,
-            capability_flags_upper_bits <- format::U16,
-            auth_plugin_data_length <- format::U8,
-            _filler <- format::FixedBytes::<10>
-        });
+        let head = RawHandshakeV10ExtHeadProtocolFormat
+            .read_format(reader)
+            .await?;
         let capability_flags = short
             .capability_flags
-            .combine_upper_bytes(capability_flags_upper_bits);
+            .combine_upper_bytes(head.capability_flags_upper_bits);
 
         let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
-            Some(format::Bytes(13.max(auth_plugin_data_length - 8) as _).read_format(reader).await?)
+            Some(
+                format::Bytes(13.max(head.auth_plugin_data_length - 8) as _)
+                    .read_format(reader)
+                    .await?,
+            )
         } else {
             None
         };
@@ -94,8 +97,8 @@ impl HandshakeV10Long {
                 capability_flags,
                 ..short
             },
-            character_set,
-            status_flags,
+            character_set: head.character_set,
+            status_flags: head.status_flags,
             auth_plugin_data_part_2,
             auth_plugin_name,
         })
@@ -105,19 +108,13 @@ impl HandshakeV10Long {
         short: HandshakeV10Short,
         reader: &mut impl Read,
     ) -> std::io::Result<Self> {
-        ReadSync!(reader => {
-            character_set <- format::U8,
-            status_flags <- format::U16,
-            capability_flags_upper_bits <- format::U16,
-            auth_plugin_data_length <- format::U8,
-            _filler <- format::FixedBytes::<10>
-        });
+        let head = RawHandshakeV10ExtHeadProtocolFormat.read_sync(reader)?;
         let capability_flags = short
             .capability_flags
-            .combine_upper_bytes(capability_flags_upper_bits);
+            .combine_upper_bytes(head.capability_flags_upper_bits);
 
         let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
-            Some(format::Bytes(13.max(auth_plugin_data_length - 8) as _).read_sync(reader)?)
+            Some(format::Bytes(13.max(head.auth_plugin_data_length - 8) as _).read_sync(reader)?)
         } else {
             None
         };
@@ -132,8 +129,8 @@ impl HandshakeV10Long {
                 capability_flags,
                 ..short
             },
-            character_set,
-            status_flags,
+            character_set: head.character_set,
+            status_flags: head.status_flags,
             auth_plugin_data_part_2,
             auth_plugin_name,
         })

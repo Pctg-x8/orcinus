@@ -11,6 +11,11 @@ pub trait ProtocolFormatFragment {
     type Output;
 
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output>;
+
+    #[inline]
+    fn map<F, R>(self, mapper: F) -> Mapped<Self, F> where Self: Sized, F: FnOnce(Self::Output) -> R {
+        Mapped(self, mapper)
+    }
 }
 
 pub trait AsyncProtocolFormatFragment<'r, R: 'r + ?Sized>: ProtocolFormatFragment {
@@ -513,6 +518,32 @@ impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> 
     }
 }
 
+pub struct Mapped<PF, F>(pub PF, pub F);
+impl<PF, F, R> ProtocolFormatFragment for Mapped<PF, F>
+where
+    PF: ProtocolFormatFragment,
+    F: FnOnce(PF::Output) -> R,
+{
+    type Output = R;
+
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+        self.0.read_sync(reader).map(self.1)
+    }
+}
+impl<'r, R, PF, F, Ret> AsyncProtocolFormatFragment<'r, R> for Mapped<PF, F>
+where
+    PF: AsyncProtocolFormatFragment<'r, R>,
+    F: FnOnce(<PF as ProtocolFormatFragment>::Output) -> Ret,
+    R: AsyncRead + Unpin + ?Sized + 'r,
+    F: 'r
+{
+    type ReaderF = futures_util::future::MapOk<PF::ReaderF, F>;
+
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        self.0.read_format(reader).map_ok(self.1)
+    }
+}
+
 macro_rules! ProtocolFormatFragmentGroup {
     ($($a: ident: $n: tt),+) => {
         impl<$($a),+> ProtocolFormatFragment for ($($a),+) where $($a: ProtocolFormatFragment),+ {
@@ -586,5 +617,46 @@ macro_rules! ReadAsync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
         #[allow(unused_parens)]
         let ($($val),*) = ($($fmt),*).read_format($reader).await?;
+    }
+}
+
+#[macro_export]
+macro_rules! DefFormatStruct {
+    ($struct_name: ident($pf_name: ident) { $($val: ident($vty: ty) <- $fmt: expr),* }) => {
+        struct $struct_name {
+            $($val: $vty),*
+        }
+
+        DefProtocolFormat!($pf_name for $struct_name { $($val <- $fmt),* });
+    }
+}
+#[macro_export]
+macro_rules! DefProtocolFormat {
+    ($pf_name: ident for $struct_name: ident { $($val: ident <- $fmt: expr),* }) => {
+        struct $pf_name;
+        impl ProtocolFormatFragment for $pf_name {
+            type Output = $struct_name;
+
+            #[inline]
+            fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+                ReadSync!(reader => { $($val <- $fmt),* });
+
+                Ok($struct_name { $($val),* })
+            }
+        }
+        impl<'r, R> AsyncProtocolFormatFragment<'r, R> for $pf_name where R: tokio::io::AsyncRead + Unpin + ?Sized + 'r {
+            type ReaderF = futures_util::future::LocalBoxFuture<'r, std::io::Result<$struct_name>>;
+
+            #[inline]
+            fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+                use futures_util::future::FutureExt;
+
+                async move {
+                    ReadAsync!(reader => { $($val <- $fmt),* });
+
+                    Ok($struct_name { $($val),* })
+                }.boxed_local()
+            }
+        }
     }
 }
