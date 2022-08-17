@@ -1,6 +1,9 @@
+use std::borrow::Cow;
+
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use rsa::{pkcs8::DecodePublicKey, PaddingScheme, PublicKey, RsaPublicKey};
-use sha2::Sha256;
+use sha1::Sha1;
+use x509_parser::prelude::parse_x509_pem;
 
 use crate::{
     protos::{
@@ -117,12 +120,22 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             }
             assert_eq!(resp, [0x04]); // requires full authentication
 
-            let (server_spki_der, last_sequence_id) = if let Some(spki_der) = self.0.server_spki_der
-            {
-                (spki_der, last_sequence_id)
-            } else {
-                todo!("public key retrieval");
-            };
+            let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) =
+                if let Some(spki_der) = self.0.server_spki_der {
+                    (Cow::Borrowed(spki_der), last_sequence_id)
+                } else {
+                    // note: requesting server pubkey(ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい)
+                    write_packet(stream, &[0x02], last_sequence_id + 1).await?;
+                    stream.flush().await?;
+                    let (AuthMoreData(resp), last_sequence_id) =
+                        AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)
+                            .await?
+                            .into_result()?;
+                    let (_, spki_der) =
+                        parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
+
+                    (Cow::Owned(spki_der.contents), last_sequence_id)
+                };
 
             let scrambled_password = con_info
                 .password
@@ -131,14 +144,16 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                     self.0
                         .scramble_buffer_1
                         .iter()
-                        .chain(self.0.scramble_buffer_2.iter())
+                        .chain(
+                            self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1].iter(),
+                        )
                         .cycle(),
                 )
-                .map(|(a, b)| a ^ b)
+                .map(|(a, &b)| a ^ b)
                 .collect::<Vec<_>>();
             let key =
-                RsaPublicKey::from_public_key_der(server_spki_der).expect("invalid spki format");
-            let padding = PaddingScheme::new_oaep::<Sha256>();
+                RsaPublicKey::from_public_key_der(&server_spki_der).expect("invalid spki format");
+            let padding = PaddingScheme::new_oaep::<Sha1>();
             let auth_response = key
                 .encrypt(&mut rand::thread_rng(), padding, &scrambled_password)
                 .expect("Failed to encrypt password");
@@ -196,11 +211,21 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
         }
         assert_eq!(resp, [0x04]); // requires full authentication
 
-        let (server_spki_der, last_sequence_id) = if let Some(spki_der) = self.0.server_spki_der {
-            (spki_der, last_sequence_id)
-        } else {
-            todo!("public key retrieval");
-        };
+        let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) =
+            if let Some(spki_der) = self.0.server_spki_der {
+                (Cow::Borrowed(spki_der), last_sequence_id)
+            } else {
+                // note: requesting server pubkey(ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい)
+                write_packet_sync(stream, &[0x02], last_sequence_id + 1)?;
+                stream.flush()?;
+                let (AuthMoreData(resp), last_sequence_id) =
+                    AuthMoreDataResponse::read_packet_sync(stream, con_info.client_capabilities)?
+                        .into_result()?;
+                let (_, spki_der) =
+                    parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
+
+                (Cow::Owned(spki_der.contents), last_sequence_id)
+            };
 
         let scrambled_password = con_info
             .password
@@ -209,13 +234,13 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                 self.0
                     .scramble_buffer_1
                     .iter()
-                    .chain(self.0.scramble_buffer_2.iter())
+                    .chain(self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1].iter())
                     .cycle(),
             )
-            .map(|(a, b)| a ^ b)
+            .map(|(a, &b)| a ^ b)
             .collect::<Vec<_>>();
-        let key = RsaPublicKey::from_public_key_der(server_spki_der).expect("invalid spki format");
-        let padding = PaddingScheme::new_oaep::<Sha256>();
+        let key = RsaPublicKey::from_public_key_der(&server_spki_der).expect("invalid spki format");
+        let padding = PaddingScheme::new_oaep::<Sha1>();
         let auth_response = key
             .encrypt(&mut rand::thread_rng(), padding, &scrambled_password)
             .expect("Failed to encrypt password");
