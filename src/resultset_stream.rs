@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::{future::LocalBoxFuture, FutureExt};
+use futures_util::{future::LocalBoxFuture, FutureExt, TryStreamExt};
 use tokio::io::AsyncReadExt;
 
 use crate::{
@@ -153,6 +153,12 @@ where
             columns,
             state: TextResultsetStreamState::Initialized,
         })
+    }
+
+    pub async fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
+        while let Some(_) = self.try_next().await? {}
+
+        Ok(())
     }
 }
 impl<R> TextResultsetStream<'_, R> {
@@ -335,6 +341,14 @@ where
     pub unsafe fn column_types_unchecked<'s>(&'s self) -> impl Iterator<Item = ColumnType> + 's {
         self.columns.iter().map(|c| c.type_unchecked())
     }
+
+    pub fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
+        while let Some(r) = self.next() {
+            let _ = r?;
+        }
+
+        Ok(())
+    }
 }
 impl<R> Iterator for BinaryResultsetIterator<R>
 where
@@ -465,6 +479,12 @@ where
 
     pub unsafe fn column_types_unchecked(&'s self) -> impl Iterator<Item = ColumnType> + 's {
         self.columns.iter().map(|c| c.type_unchecked())
+    }
+
+    pub async fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
+        while let Some(_) = self.try_next().await? {}
+
+        Ok(())
     }
 }
 impl<R> BinaryResultsetStream<'_, R> {
