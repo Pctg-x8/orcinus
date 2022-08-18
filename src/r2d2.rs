@@ -4,7 +4,7 @@ use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
     protos::{drop_packet_sync, ClientPacket, StmtPrepareCommand, StmtPrepareResult},
-    BlockingStatement, CommunicationError, SharedBlockingMysqlClient,
+    BlockingStatement, CommunicationError, GenericClient, SharedBlockingMysqlClient,
 };
 
 pub struct MysqlTcpConnection<'s, A: ToSocketAddrs> {
@@ -21,10 +21,42 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
         let stream = std::net::TcpStream::connect(&self.addr)?;
         super::BlockingClient::handshake(stream, &self.con_info)
     }
+
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         conn.fetch_all("Select 1")
             .map_err(From::from)
             .and_then(|mut s| s.drop_all_rows())
+    }
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        self.is_valid(conn).is_err()
+    }
+}
+
+#[cfg(feature = "autossl")]
+pub struct MysqlConnection<'s, A: ToSocketAddrs> {
+    pub addr: A,
+    pub server_name: rustls::ServerName,
+    pub con_info: super::autossl_client::SSLConnectInfo<'s>,
+}
+impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
+    for MysqlConnection<'static, A>
+{
+    type Connection = super::autossl_client::BlockingClient;
+    type Error = super::autossl_client::ConnectionError;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        super::autossl_client::BlockingClient::new(
+            &self.addr,
+            self.server_name.clone(),
+            &self.con_info,
+        )
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        conn.fetch_all("Select 1")
+            .map_err(From::from)
+            .and_then(|mut s| s.drop_all_rows())
+            .map_err(From::from)
     }
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
         self.is_valid(conn).is_err()
@@ -53,7 +85,7 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlTcpConnec
     ) -> Result<BlockingStatement<'c, Self>, CommunicationError>
     where
         Self: SharedBlockingMysqlClient<'c>,
-        <Self as SharedBlockingMysqlClient<'c>>::Stream: Write,
+        <<Self as SharedBlockingMysqlClient<'c>>::Client as GenericClient>::Stream: Write,
     {
         let mut c = self.lock();
         let cap = c.capability;
@@ -85,29 +117,87 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlTcpConnec
         })
     }
 }
-impl<'c, A: ToSocketAddrs + Send + Sync + 'static> SharedBlockingMysqlClient<'c>
-    for SharedPooledClient<MysqlTcpConnection<'static, A>>
+
+impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
+    for r2d2::PooledConnection<MysqlTcpConnection<'static, A>>
 {
     type Stream = std::net::TcpStream;
-    type GuardedClientRef = LockedSharedPooledClient<'c, MysqlTcpConnection<'static, A>>;
+
+    fn stream(&self) -> &Self::Stream {
+        &self.stream
+    }
+    fn stream_mut(&mut self) -> &mut Self::Stream {
+        &mut self.stream
+    }
+    fn capability(&self) -> crate::protos::CapabilityFlags {
+        self.capability
+    }
+}
+impl<'c, M: r2d2::ManageConnection> SharedBlockingMysqlClient<'c> for SharedPooledClient<M>
+where
+    r2d2::PooledConnection<M>: GenericClient,
+{
+    type Client = r2d2::PooledConnection<M>;
+    type GuardedClientRef = MutexGuard<'c, r2d2::PooledConnection<M>>;
 
     fn lock_client(&'c self) -> Self::GuardedClientRef {
-        LockedSharedPooledClient(self.lock())
+        self.lock()
     }
 }
 
-pub struct LockedSharedPooledClient<'c, M: r2d2::ManageConnection>(
-    MutexGuard<'c, r2d2::PooledConnection<M>>,
-);
-impl<'c, M: r2d2::ManageConnection> std::ops::Deref for LockedSharedPooledClient<'c, M> {
-    type Target = M::Connection;
+#[cfg(feature = "autossl")]
+impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
+    for r2d2::PooledConnection<MysqlConnection<'static, A>>
+{
+    type Stream = super::autossl_client::DynamicStream;
 
-    fn deref(&self) -> &Self::Target {
-        &**self.0
+    fn stream(&self) -> &Self::Stream {
+        (**self).stream()
+    }
+    fn stream_mut(&mut self) -> &mut Self::Stream {
+        (**self).stream_mut()
+    }
+    fn capability(&self) -> crate::protos::CapabilityFlags {
+        (**self).capability()
     }
 }
-impl<'c, M: r2d2::ManageConnection> std::ops::DerefMut for LockedSharedPooledClient<'c, M> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut **self.0
+#[cfg(feature = "autossl")]
+impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlConnection<'static, A>> {
+    pub fn prepare<'c>(
+        &'c self,
+        statement: &str,
+    ) -> Result<BlockingStatement<'c, Self>, CommunicationError>
+    where
+        Self: SharedBlockingMysqlClient<'c>,
+        <<Self as SharedBlockingMysqlClient<'c>>::Client as GenericClient>::Stream: Write,
+    {
+        let mut c = self.lock();
+        let cap = c.capability();
+
+        StmtPrepareCommand(statement).write_packet_sync(c.stream_mut(), 0)?;
+        c.stream_mut().flush()?;
+        let resp = StmtPrepareResult::read_packet_sync(c.stream_mut(), cap)?.into_result()?;
+
+        // simply drop unused packets
+        for _ in 0..resp.num_params {
+            drop_packet_sync(c.stream_mut())?;
+        }
+        if !cap.support_deprecate_eof() {
+            // extra eof packet
+            drop_packet_sync(c.stream_mut())?;
+        }
+
+        for _ in 0..resp.num_columns {
+            drop_packet_sync(c.stream_mut())?;
+        }
+        if !cap.support_deprecate_eof() {
+            // extra eof packet
+            drop_packet_sync(c.stream_mut())?;
+        }
+
+        Ok(BlockingStatement {
+            client: self,
+            statement_id: resp.statement_id,
+        })
     }
 }
