@@ -30,7 +30,7 @@ fn main() {
         server_name: rustls::ServerName::try_from("localhost").expect("invalid host name"),
         con_info: orcinus::autossl_client::SSLConnectInfo {
             base: orcinus::ConnectInfo::new("root", "root").database("test"),
-            ssl_config: std::sync::Arc::new(cc)
+            ssl_config: std::sync::Arc::new(cc),
         },
     })
     .expect("Failed to connect with r2d2");

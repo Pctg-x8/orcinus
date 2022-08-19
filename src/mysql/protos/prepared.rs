@@ -256,7 +256,7 @@ impl StmtExecuteResult {
                 client_capability,
             )
             .map(Self::Err),
-            _ => format::LengthEncodedInteger
+            _ => format::LengthEncodedIntegerAhead(head_byte)
                 .read_sync(reader.into_inner())
                 .map(|x| Self::Resultset { column_count: x }),
         }
