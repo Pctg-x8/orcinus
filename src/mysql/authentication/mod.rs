@@ -5,15 +5,15 @@ mod sha256;
 use std::io::Read;
 use std::io::Write;
 
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::protos::CapabilityFlags;
-use crate::protos::HandshakeResponse;
+use crate::protos::ClientPacket;
 use crate::protos::HandshakeResponse320;
 use crate::protos::HandshakeResponse41;
 use crate::protos::OKPacket;
 use crate::CommunicationError;
-use crate::PacketReader;
 
 pub use self::clear_text::*;
 pub use self::secure_password::*;
@@ -28,13 +28,14 @@ pub struct ConnectionInfo<'s> {
     pub database: Option<&'s str>,
 }
 impl ConnectionInfo<'_> {
+    #[inline]
     pub fn make_handshake_response<'s>(
         &'s self,
         auth_response: &'s [u8],
         auth_plugin_name: Option<&'s str>,
-    ) -> HandshakeResponse<'s> {
+    ) -> Box<dyn ClientPacket + 's> {
         if self.client_capabilities.support_41_protocol() {
-            HandshakeResponse::New(HandshakeResponse41 {
+            Box::new(HandshakeResponse41 {
                 capability: self.client_capabilities,
                 max_packet_size: self.max_packet_size,
                 character_set: self.character_set,
@@ -45,7 +46,7 @@ impl ConnectionInfo<'_> {
                 connect_attrs: Default::default(),
             })
         } else {
-            HandshakeResponse::Old(HandshakeResponse320 {
+            Box::new(HandshakeResponse320 {
                 capability: self.client_capabilities,
                 max_packet_size: self.max_packet_size,
                 username: self.username,
@@ -62,14 +63,14 @@ pub trait Authentication<'s> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl PacketReader + AsyncWriteExt + Unpin),
+        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         con_info: &'s ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF;
 
     fn run_sync(
         &self,
-        stream: &mut (impl Read + Write),
+        stream: &mut (impl Read + Write + ?Sized),
         con_info: &ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError>;

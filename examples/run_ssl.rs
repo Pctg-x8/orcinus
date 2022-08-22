@@ -1,5 +1,5 @@
 use futures_util::TryStreamExt;
-use orcinus::{authentication::Authentication, protos::ClientPacket};
+use orcinus::{authentication::Authentication, protos::ClientPacketSendExt};
 use tokio::io::AsyncWriteExt;
 
 /// do not use this at other of localhost connection

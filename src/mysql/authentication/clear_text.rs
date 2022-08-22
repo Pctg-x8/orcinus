@@ -1,11 +1,11 @@
 use std::io::{Read, Write};
 
 use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    protos::{ClientPacket, GenericOKErrPacket, OKPacket},
-    CommunicationError, PacketReader,
+    protos::{ClientPacketSendExt, GenericOKErrPacket, OKPacket},
+    CommunicationError,
 };
 
 pub struct ClearText;
@@ -15,7 +15,7 @@ impl<'s> super::Authentication<'s> for ClearText {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl PacketReader + AsyncWriteExt + Unpin),
+        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {
@@ -41,7 +41,7 @@ impl<'s> super::Authentication<'s> for ClearText {
 
     fn run_sync(
         &self,
-        stream: &mut (impl Read + Write),
+        stream: &mut (impl Read + Write + ?Sized),
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {

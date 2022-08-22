@@ -8,7 +8,7 @@ use crate::{
         CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket, InvalidColumnTypeError,
         LengthEncodedInteger, OKPacket, PacketHeader,
     },
-    DefFormatStruct, PacketReader, ReadCounted, ReadCountedSync,
+    DefFormatStruct, ReadCounted, ReadCountedSync,
 };
 
 pub struct QueryCommand<'s>(pub &'s str);
@@ -30,8 +30,29 @@ pub enum QueryCommandResponse {
     Resultset { column_count: u64 },
 }
 impl QueryCommandResponse {
+    #[inline]
+    const fn resultset_format(
+        head_byte: u8,
+    ) -> format::Mapped<format::LengthEncodedIntegerAhead, fn(u64) -> QueryCommandResponse> {
+        fn make(column_count: u64) -> QueryCommandResponse {
+            QueryCommandResponse::Resultset { column_count }
+        }
+
+        format::Mapped(format::LengthEncodedIntegerAhead(head_byte), make)
+    }
+    #[inline]
+    const fn local_infile_format(
+        string_length: usize,
+    ) -> format::Mapped<format::FixedLengthString, fn(String) -> QueryCommandResponse> {
+        fn make(filename: String) -> QueryCommandResponse {
+            QueryCommandResponse::LocalInfileRequest { filename }
+        }
+
+        format::Mapped(format::FixedLengthString(string_length), make)
+    }
+
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
+        reader: &mut (impl AsyncReadExt + Unpin),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_format(reader).await?;
@@ -53,16 +74,18 @@ impl QueryCommandResponse {
             )
             .await
             .map(Self::Err),
-            0xfb => format::FixedLengthString(
-                packet_header.payload_length as usize - reader.read_bytes(),
-            )
-            .read_format(reader.into_inner())
-            .await
-            .map(|filename| Self::LocalInfileRequest { filename }),
-            _ => format::LengthEncodedIntegerAhead(head_value)
+            0xfb => {
+                Self::local_infile_format(
+                    packet_header.payload_length as usize - reader.read_bytes(),
+                )
                 .read_format(reader.into_inner())
                 .await
-                .map(|x| Self::Resultset { column_count: x }),
+            }
+            _ => {
+                Self::resultset_format(head_value)
+                    .read_format(reader.into_inner())
+                    .await
+            }
         }
     }
 
@@ -87,14 +110,11 @@ impl QueryCommandResponse {
                 client_capability,
             )
             .map(Self::Err),
-            0xfb => format::FixedLengthString(
+            0xfb => Self::local_infile_format(
                 packet_header.payload_length as usize - reader.read_bytes(),
             )
-            .read_sync(&mut reader)
-            .map(|filename| Self::LocalInfileRequest { filename }),
-            _ => format::LengthEncodedIntegerAhead(head_value)
-                .read_sync(reader.into_inner())
-                .map(|x| Self::Resultset { column_count: x }),
+            .read_sync(reader.into_inner()),
+            _ => Self::resultset_format(head_value).read_sync(reader.into_inner()),
         }
     }
 }
@@ -162,7 +182,7 @@ impl From<RawColumnDefinition41ForFieldList> for ColumnDefinition41 {
 }
 impl ColumnDefinition41 {
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         RawColumnDefinition41Format
             .read_format(reader)
@@ -177,7 +197,7 @@ impl ColumnDefinition41 {
     }
 
     pub async fn read_packet_for_field_list(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         RawColumnDefinition41ForFieldListFormat
             .read_format(reader)
@@ -253,18 +273,27 @@ pub enum Resultset41 {
     EOF(EOFPacket41),
 }
 impl Resultset41 {
+    #[inline]
+    const fn row_format(
+        head_byte: u8,
+        payload_length: usize,
+    ) -> format::Mapped<format::BytesAhead, fn(Vec<u8>) -> Resultset41> {
+        fn make(b: Vec<u8>) -> Resultset41 {
+            Resultset41::Row(ResultsetRow(b))
+        }
+
+        format::Mapped(format::BytesAhead(head_byte, payload_length), make)
+    }
+
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let r1 = reader.read_u8().await?;
+        let head_byte = format::U8.read_format(&mut reader).await?;
 
-        match r1 {
-            0xfe if !client_capabilities.support_deprecate_eof() => {
-                EOFPacket41::read(&mut reader).await.map(Self::EOF)
-            }
+        match head_byte {
             // treat as OK Packet for client supports DEPRECATE_EOF capability
             0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
                 packet_header.payload_length as _,
@@ -273,6 +302,7 @@ impl Resultset41 {
             )
             .await
             .map(Self::Ok),
+            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
             0x00 => OKPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -288,13 +318,9 @@ impl Resultset41 {
             .await
             .map(Self::Err),
             _ => {
-                let mut contents = Vec::with_capacity(packet_header.payload_length as _);
-                unsafe {
-                    contents.set_len(packet_header.payload_length as _);
-                }
-                contents[0] = r1;
-                reader.read_exact(&mut contents[1..]).await?;
-                Ok(Self::Row(ResultsetRow(contents)))
+                Self::row_format(head_byte, packet_header.payload_length as _)
+                    .read_format(reader.into_inner())
+                    .await
             }
         }
     }
@@ -308,9 +334,6 @@ impl Resultset41 {
         let head_byte = format::U8.read_sync(&mut reader)?;
 
         match head_byte {
-            0xfe if !client_capability.support_deprecate_eof() => {
-                EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF)
-            }
             // treat as OK Packet for client supports DEPRECATE_EOF capability
             0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
                 packet_header.payload_length as _,
@@ -318,6 +341,7 @@ impl Resultset41 {
                 client_capability,
             )
             .map(Self::Ok),
+            0xfe => EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF),
             0x00 => OKPacket::read_sync(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -330,15 +354,8 @@ impl Resultset41 {
                 client_capability,
             )
             .map(Self::Err),
-            _ => {
-                let mut contents = Vec::with_capacity(packet_header.payload_length as _);
-                unsafe {
-                    contents.set_len(packet_header.payload_length as _);
-                }
-                contents[0] = head_byte;
-                reader.read_exact(&mut contents[1..])?;
-                Ok(Self::Row(ResultsetRow(contents)))
-            }
+            _ => Self::row_format(head_byte, packet_header.payload_length as _)
+                .read_sync(reader.into_inner()),
         }
     }
 }

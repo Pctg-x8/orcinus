@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::{
     authentication::{self, Authentication},
     protos::{
-        drop_packet, drop_packet_sync, CapabilityFlags, ClientPacket, ErrPacket, Handshake,
+        drop_packet, drop_packet_sync, CapabilityFlags, ClientPacketSendExt, ErrPacket, Handshake,
         QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest, StmtPrepareCommand,
         StmtPrepareResult,
     },

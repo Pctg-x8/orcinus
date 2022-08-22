@@ -3,7 +3,7 @@ use std::{io::Write, net::ToSocketAddrs};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
-    protos::{drop_packet_sync, ClientPacket, StmtPrepareCommand, StmtPrepareResult},
+    protos::{drop_packet_sync, ClientPacketSendExt, StmtPrepareCommand, StmtPrepareResult},
     BlockingStatement, CommunicationError, GenericClient, SharedBlockingMysqlClient,
 };
 

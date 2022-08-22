@@ -11,7 +11,7 @@ use crate::{
         BinaryResultset41, BinaryResultsetRow, CapabilityFlags, ColumnDefinition41, ColumnType,
         EOFPacket41, Resultset41, ResultsetRow,
     },
-    CommunicationError, PacketReader,
+    CommunicationError,
 };
 
 pub enum TextResultsetIteratorState {
@@ -118,7 +118,7 @@ pub enum TextResultsetStreamState<'a> {
     PendingReadOp(LocalBoxFuture<'a, std::io::Result<Resultset41>>),
     Finish { more_resultset: bool },
 }
-pub struct TextResultsetStream<'s, R> {
+pub struct TextResultsetStream<'s, R: ?Sized> {
     pub stream: &'s mut R,
     pub client_capability: CapabilityFlags,
     pub columns: Vec<ColumnDefinition41>,
@@ -126,7 +126,7 @@ pub struct TextResultsetStream<'s, R> {
 }
 impl<'s, R> TextResultsetStream<'s, R>
 where
-    R: PacketReader + Unpin,
+    R: AsyncReadExt + Unpin + ?Sized,
 {
     pub async fn new(
         stream: &'s mut R,
@@ -161,7 +161,7 @@ where
         Ok(())
     }
 }
-impl<R> TextResultsetStream<'_, R> {
+impl<R: ?Sized> TextResultsetStream<'_, R> {
     pub fn has_more_resultset(&self) -> Option<bool> {
         match self.state {
             TextResultsetStreamState::Finish { more_resultset } => Some(more_resultset),
@@ -171,7 +171,7 @@ impl<R> TextResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for TextResultsetStream<'s, R>
 where
-    R: tokio::io::AsyncReadExt + Unpin,
+    R: AsyncReadExt + Unpin + ?Sized,
 {
     type Item = Result<ResultsetRow, CommunicationError>;
 
@@ -378,7 +378,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
     pub fn poll_next(
         self,
         cx: &mut Context<'_>,
-        stream: &'a mut (impl AsyncReadExt + Unpin),
+        stream: &'a mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> (
@@ -449,7 +449,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
         }
     }
 }
-pub struct BinaryResultsetStream<'s, R> {
+pub struct BinaryResultsetStream<'s, R: ?Sized> {
     pub stream: &'s mut R,
     pub client_capability: CapabilityFlags,
     pub columns: Vec<ColumnDefinition41>,
@@ -457,7 +457,7 @@ pub struct BinaryResultsetStream<'s, R> {
 }
 impl<'s, R> BinaryResultsetStream<'s, R>
 where
-    R: PacketReader + Unpin,
+    R: AsyncReadExt + Unpin + ?Sized,
 {
     pub async fn new(
         stream: &'s mut R,
@@ -487,7 +487,7 @@ where
         Ok(())
     }
 }
-impl<R> BinaryResultsetStream<'_, R> {
+impl<R: ?Sized> BinaryResultsetStream<'_, R> {
     pub fn has_more_resultset(&self) -> Option<bool> {
         match self.state {
             BinaryResultsetStreamState::Finish { more_resultset } => Some(more_resultset),
@@ -497,7 +497,7 @@ impl<R> BinaryResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for BinaryResultsetStream<'s, R>
 where
-    R: tokio::io::AsyncReadExt + Unpin,
+    R: AsyncReadExt + Unpin + ?Sized,
 {
     type Item = Result<BinaryResultsetRow, CommunicationError>;
 

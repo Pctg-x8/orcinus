@@ -3,11 +3,12 @@ use std::borrow::Cow;
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use rsa::{pkcs8::DecodePublicKey, PaddingScheme, PublicKey, RsaPublicKey};
 use sha1::Sha1;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x509_parser::prelude::parse_x509_pem;
 
 use crate::{
     protos::{
-        write_packet, write_packet_sync, AuthMoreData, AuthMoreDataResponse, ClientPacket,
+        write_packet, write_packet_sync, AuthMoreData, AuthMoreDataResponse, ClientPacketSendExt,
         GenericOKErrPacket, OKPacket,
     },
     CommunicationError,
@@ -24,7 +25,7 @@ impl<'s> super::Authentication<'s> for SHA256<'_> {
 
     fn run(
         &'s self,
-        _stream: &'s mut (impl crate::PacketReader + tokio::io::AsyncWriteExt + Unpin),
+        _stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         _con_info: &'s super::ConnectionInfo,
         _first_sequence_id: u8,
     ) -> Self::OperationF {
@@ -33,7 +34,7 @@ impl<'s> super::Authentication<'s> for SHA256<'_> {
 
     fn run_sync(
         &self,
-        _stream: &mut (impl std::io::Read + std::io::Write),
+        _stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
         _con_info: &super::ConnectionInfo,
         _first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
@@ -73,7 +74,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl crate::PacketReader + tokio::io::AsyncWriteExt + Unpin),
+        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {
@@ -170,7 +171,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
     fn run_sync(
         &self,
-        stream: &mut (impl std::io::Read + std::io::Write),
+        stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {

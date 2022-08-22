@@ -2,7 +2,7 @@ use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::{DefFormatStruct, PacketReader, ReadCounted, ReadCountedSync};
+use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
@@ -124,7 +124,7 @@ impl From<RawStmtPrepareOk> for StmtPrepareOk {
     }
 }
 impl StmtPrepareOk {
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
+    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
         RawStmtPrepareOkFormat
             .read_format(reader)
             .await
@@ -138,14 +138,24 @@ impl StmtPrepareOk {
 
 #[derive(Debug)]
 pub struct StmtPrepareResult(Result<StmtPrepareOk, ErrPacket>);
+impl From<StmtPrepareOk> for StmtPrepareResult {
+    fn from(r: StmtPrepareOk) -> Self {
+        Self(Ok(r))
+    }
+}
+impl From<ErrPacket> for StmtPrepareResult {
+    fn from(r: ErrPacket) -> Self {
+        Self(Err(r))
+    }
+}
 impl StmtPrepareResult {
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let first_byte = reader.read_u8().await?;
+        let first_byte = format::U8.read_format(&mut reader).await?;
 
         match first_byte {
             0xff => ErrPacket::read(
@@ -154,10 +164,10 @@ impl StmtPrepareResult {
                 client_capabilities,
             )
             .await
-            .map(|e| Self(Err(e))),
+            .map(From::from),
             0x00 => StmtPrepareOk::read(reader.into_inner())
                 .await
-                .map(|r| Self(Ok(r))),
+                .map(From::from),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -176,8 +186,8 @@ impl StmtPrepareResult {
                 &mut reader,
                 client_capability,
             )
-            .map(|e| Self(Err(e))),
-            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(|x| Self(Ok(x))),
+            .map(From::from),
+            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(From::from),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -195,15 +205,26 @@ pub enum StmtExecuteResult {
     Ok(OKPacket),
 }
 impl StmtExecuteResult {
+    #[inline]
+    const fn resultset_format(
+        head_byte: u8,
+    ) -> format::Mapped<format::LengthEncodedIntegerAhead, fn(u64) -> StmtExecuteResult> {
+        fn make_resultset(column_count: u64) -> StmtExecuteResult {
+            StmtExecuteResult::Resultset { column_count }
+        }
+
+        format::Mapped(format::LengthEncodedIntegerAhead(head_byte), make_resultset)
+    }
+
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let r1 = reader.read_u8().await?;
+        let head_byte = format::U8.read_format(&mut reader).await?;
 
-        match r1 {
+        match head_byte {
             0x00 => OKPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -218,10 +239,11 @@ impl StmtExecuteResult {
             )
             .await
             .map(Self::Err),
-            _ => format::LengthEncodedIntegerAhead(r1)
-                .read_format(reader.into_inner())
-                .await
-                .map(|x| Self::Resultset { column_count: x }),
+            _ => {
+                Self::resultset_format(head_byte)
+                    .read_format(reader.into_inner())
+                    .await
+            }
         }
     }
 
@@ -246,9 +268,7 @@ impl StmtExecuteResult {
                 client_capability,
             )
             .map(Self::Err),
-            _ => format::LengthEncodedIntegerAhead(head_byte)
-                .read_sync(reader.into_inner())
-                .map(|x| Self::Resultset { column_count: x }),
+            _ => Self::resultset_format(head_byte).read_sync(reader.into_inner()),
         }
     }
 }

@@ -2,10 +2,8 @@
 
 use std::{io::Read, pin::Pin};
 
-use futures_util::{future::LocalBoxFuture, FutureExt, TryFutureExt};
-use tokio::io::AsyncRead;
-
-use crate::ReadNullTerminatedString;
+use futures_util::{future::LocalBoxFuture, FutureExt, TryFutureExt, pin_mut};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub trait ProtocolFormatFragment {
     type Output;
@@ -256,6 +254,20 @@ impl<R> ReadBytes<R> {
             read_bytes: 0,
         }
     }
+
+    fn new_ahead(reader: R, head: u8, required_bytes: usize) -> Self {
+        let mut buf = Vec::with_capacity(required_bytes);
+        unsafe {
+            buf.set_len(required_bytes);
+        }
+        buf[0] = head;
+
+        Self {
+            reader,
+            buf,
+            read_bytes: 1,
+        }
+    }
 }
 impl<R: AsyncRead + Unpin> std::future::Future for ReadBytes<R> {
     type Output = std::io::Result<Vec<u8>>;
@@ -273,6 +285,53 @@ impl<R: AsyncRead + Unpin> std::future::Future for ReadBytes<R> {
                 let r = std::mem::replace(&mut this.buf, Vec::new());
                 this.read_bytes = 0;
                 std::task::Poll::Ready(Ok(r))
+            }
+        }
+    }
+}
+
+pub struct ReadNullTerminatedString<R> {
+    reader: R,
+    collected: Vec<u8>,
+}
+impl<R> ReadNullTerminatedString<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            collected: Vec::new(),
+        }
+    }
+}
+impl<R> std::future::Future for ReadNullTerminatedString<R>
+where
+    R: AsyncReadExt + Unpin,
+{
+    type Output = std::io::Result<String>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+
+        loop {
+            let f = this.reader.read_u8();
+            pin_mut!(f);
+
+            match f.poll(cx) {
+                std::task::Poll::Pending => break std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(e)) => break std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Ready(Ok(0)) => {
+                    break std::task::Poll::Ready(Ok(unsafe {
+                        String::from_utf8_unchecked(std::mem::replace(
+                            &mut this.collected,
+                            Vec::new(),
+                        ))
+                    }))
+                }
+                std::task::Poll::Ready(Ok(c)) => {
+                    this.collected.push(c);
+                }
             }
         }
     }
@@ -448,6 +507,33 @@ impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> 
     #[inline]
     fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
         ReadBytes::new(reader, self.0)
+    }
+}
+
+pub struct BytesAhead(pub u8, pub usize);
+impl ProtocolFormatFragment for BytesAhead {
+    type Output = Vec<u8>;
+
+    #[inline]
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+        let mut b = Vec::with_capacity(self.1);
+        unsafe {
+            b.set_len(self.1);
+        }
+        b[0] = self.0;
+        reader.read_exact(&mut b)?;
+        Ok(b)
+    }
+}
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for BytesAhead
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    type ReaderF = ReadBytes<&'r mut R>;
+
+    #[inline]
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        ReadBytes::new_ahead(reader, self.0, self.1)
     }
 }
 
@@ -681,16 +767,18 @@ ProtocolFormatFragmentGroup!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 
 #[macro_export]
 macro_rules! ReadSync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
-        #[allow(unused_parens)]
-        let ($($val),*) = ($($fmt),*).read_sync($reader)?;
+        $(
+            let $val = $fmt.read_sync($reader)?;
+        )*
     }
 }
 
 #[macro_export]
 macro_rules! ReadAsync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
-        #[allow(unused_parens)]
-        let ($($val),*) = ($($fmt),*).read_format($reader).await?;
+        $(
+            let $val = $fmt.read_format($reader).await?;
+        )*
     }
 }
 
@@ -708,7 +796,7 @@ macro_rules! DefFormatStruct {
 macro_rules! DefProtocolFormat {
     ($pf_name: ident for $struct_name: ident { $($val: ident <- $fmt: expr),* }) => {
         struct $pf_name;
-        impl ProtocolFormatFragment for $pf_name {
+        impl $crate::mysql::protos::format::ProtocolFormatFragment for $pf_name {
             type Output = $struct_name;
 
             #[inline]
@@ -718,7 +806,10 @@ macro_rules! DefProtocolFormat {
                 Ok($struct_name { $($val),* })
             }
         }
-        impl<'r, R> AsyncProtocolFormatFragment<'r, R> for $pf_name where R: tokio::io::AsyncRead + Unpin + ?Sized + 'r {
+        impl<'r, R> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
+        where
+            R: tokio::io::AsyncRead + Unpin + ?Sized + 'r
+        {
             type ReaderF = futures_util::future::LocalBoxFuture<'r, std::io::Result<$struct_name>>;
 
             #[inline]

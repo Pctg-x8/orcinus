@@ -4,10 +4,10 @@ use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::{PacketReader, ReadCounted, ReadCountedSync};
+use crate::{ReadCounted, ReadCountedSync};
 
 use super::{
-    format::{self, ProtocolFormatFragment},
+    format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
     CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket, Value,
 };
 
@@ -26,7 +26,7 @@ impl ByteString<'_> {
 }
 impl<'s> ByteString<'s> {
     pub fn slice_from(reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
-        let LengthEncodedInteger(len) = LengthEncodedInteger::read_sync(reader)?;
+        let len = format::LengthEncodedInteger.read_sync(reader)?;
         let s = &reader.get_ref()[reader.position() as usize..(reader.position() + len) as usize];
         reader.set_position(reader.position() + len);
         Ok(Self(s))
@@ -41,11 +41,10 @@ impl<'s> ByteString<'s> {
 pub struct LongLong(pub u64);
 impl LongLong {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(8);
         sink.extend(self.0.to_le_bytes());
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
         Ok(Self(u64::from_le_bytes(bs)))
@@ -56,14 +55,11 @@ impl LongLong {
 pub struct Int(pub u32);
 impl Int {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(4);
         sink.extend(self.0.to_le_bytes());
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 4];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(u32::from_le_bytes(bs)))
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U32.read_sync(reader).map(Self)
     }
 }
 
@@ -71,14 +67,11 @@ impl Int {
 pub struct Short(pub u16);
 impl Short {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(2);
         sink.extend(self.0.to_le_bytes());
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 2];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(u16::from_le_bytes(bs)))
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U16.read_sync(reader).map(Self)
     }
 }
 
@@ -89,10 +82,8 @@ impl Tiny {
         sink.push(self.0);
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 1];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(bs[0]))
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U8.read_sync(reader).map(Self)
     }
 }
 
@@ -100,11 +91,10 @@ impl Tiny {
 pub struct Double(pub f64);
 impl Double {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(8);
         sink.extend(self.0.to_le_bytes());
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
         Ok(Self(f64::from_le_bytes(bs)))
@@ -115,11 +105,10 @@ impl Double {
 pub struct Float(pub f32);
 impl Float {
     pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(4);
         sink.extend(self.0.to_le_bytes());
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 4];
         reader.read_exact(&mut bs)?;
         Ok(Self(f32::from_le_bytes(bs)))
@@ -131,6 +120,8 @@ impl Float {
 pub trait BinaryProtocolValueDeconstructor {
     fn serialize_into(&self, sink: &mut Vec<u8>);
     fn column_type(&self) -> ColumnType;
+
+    #[inline]
     fn is_null(&self) -> bool {
         self.column_type() == ColumnType::Null
     }
@@ -319,17 +310,12 @@ impl BinaryResultsetRow {
         column_count: usize,
         reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
     ) -> std::io::Result<Self> {
-        let mut null_bitmap = Vec::with_capacity((column_count + 7 + 2) / 8);
-        unsafe {
-            null_bitmap.set_len((column_count + 7) / 8);
-        }
-        reader.read_exact(&mut null_bitmap).await?;
-        let rest_length = payload_length - reader.read_bytes();
-        let mut values = Vec::with_capacity(rest_length);
-        unsafe {
-            values.set_len(rest_length);
-        }
-        reader.read_exact(&mut values).await?;
+        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8)
+            .read_format(reader)
+            .await?;
+        let values = format::Bytes(payload_length - reader.read_bytes())
+            .read_format(reader)
+            .await?;
 
         Ok(Self {
             null_bitmap,
@@ -406,18 +392,15 @@ pub enum BinaryResultset41 {
 }
 impl BinaryResultset41 {
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let r1 = reader.read_u8().await?;
+        let r1 = format::U8.read_format(&mut reader).await?;
 
         match r1 {
-            0xfe if !client_capabilities.support_deprecate_eof() => {
-                EOFPacket41::read(&mut reader).await.map(Self::EOF)
-            }
             // treat as OK Packet for client supports DEPRECATE_EOF capability
             0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
                 packet_header.payload_length as _,
@@ -426,6 +409,7 @@ impl BinaryResultset41 {
             )
             .await
             .map(Self::Ok),
+            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
             0xff => ErrPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -455,9 +439,6 @@ impl BinaryResultset41 {
         let head_byte = format::U8.read_sync(&mut reader)?;
 
         match head_byte {
-            0xfe if !client_capability.support_deprecate_eof() => {
-                EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF)
-            }
             // treat as OK Packet for client supports DEPRECATE_EOF capability
             0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
                 packet_header.payload_length as _,
@@ -465,6 +446,7 @@ impl BinaryResultset41 {
                 client_capability,
             )
             .map(Self::Ok),
+            0xfe => EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF),
             0xff => ErrPacket::read_sync(
                 packet_header.payload_length as _,
                 &mut reader,

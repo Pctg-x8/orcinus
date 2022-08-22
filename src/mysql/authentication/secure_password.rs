@@ -1,10 +1,10 @@
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY as SHA1};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    protos::{ClientPacket, GenericOKErrPacket, OKPacket},
-    CommunicationError, PacketReader,
+    protos::{ClientPacketSendExt, GenericOKErrPacket, OKPacket},
+    CommunicationError,
 };
 
 pub fn gen_secure_password_auth_response(password: &str, salt1: &[u8], salt2: &[u8]) -> Vec<u8> {
@@ -32,7 +32,7 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl PacketReader + AsyncWriteExt + Unpin),
+        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {
@@ -60,7 +60,7 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
 
     fn run_sync(
         &self,
-        stream: &mut (impl std::io::Read + std::io::Write),
+        stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
