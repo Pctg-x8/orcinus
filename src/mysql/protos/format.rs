@@ -521,7 +521,7 @@ impl ProtocolFormatFragment for BytesAhead {
             b.set_len(self.1);
         }
         b[0] = self.0;
-        reader.read_exact(&mut b)?;
+        reader.read_exact(&mut b[1..])?;
         Ok(b)
     }
 }
