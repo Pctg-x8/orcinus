@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures_util::{future::LocalBoxFuture, FutureExt, TryStreamExt};
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncRead;
 
 use crate::{
     protos::{
@@ -129,7 +129,7 @@ pub struct TextResultsetStream<'s, R: ?Sized> {
 }
 impl<'s, R> TextResultsetStream<'s, R>
 where
-    R: AsyncReadExt + Unpin + ?Sized,
+    R: AsyncRead + Unpin + ?Sized,
 {
     pub async fn new(
         stream: &'s mut R,
@@ -174,7 +174,7 @@ impl<R: ?Sized> TextResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for TextResultsetStream<'s, R>
 where
-    R: AsyncReadExt + Unpin + ?Sized,
+    R: AsyncRead + Unpin + ?Sized,
 {
     type Item = Result<ResultsetRow, CommunicationError>;
 
@@ -384,7 +384,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
     pub fn poll_next(
         self,
         cx: &mut Context<'_>,
-        stream: &'a mut (impl AsyncReadExt + Unpin + ?Sized),
+        stream: &'a mut (impl AsyncRead + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> (
@@ -463,7 +463,7 @@ pub struct BinaryResultsetStream<'s, R: ?Sized> {
 }
 impl<'s, R> BinaryResultsetStream<'s, R>
 where
-    R: AsyncReadExt + Unpin + ?Sized,
+    R: AsyncRead + Unpin + ?Sized,
 {
     pub async fn new(
         stream: &'s mut R,
@@ -503,7 +503,7 @@ impl<R: ?Sized> BinaryResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for BinaryResultsetStream<'s, R>
 where
-    R: AsyncReadExt + Unpin + ?Sized,
+    R: AsyncRead + Unpin + ?Sized,
 {
     type Item = Result<BinaryResultsetRow, CommunicationError>;
 

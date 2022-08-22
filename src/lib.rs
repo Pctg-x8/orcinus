@@ -22,7 +22,6 @@ use mysql::protos::Value;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::authentication::Authentication;
@@ -293,7 +292,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         connect_info: &ConnectInfo<'_>,
     ) -> Result<Self, CommunicationError>
     where
-        Stream: AsyncReadExt,
+        Stream: AsyncRead,
     {
         let (server_handshake, sequence_id) = Handshake::read_packet(&mut stream).await?;
 
@@ -372,10 +371,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
 
     /// this function does not perform handshaking. user must be done the operation.
     pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
-        Self {
-            stream: stream,
-            capability,
-        }
+        Self { stream, capability }
     }
 
     pub fn share(self) -> SharedClient<Stream> {
@@ -399,7 +395,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         query: &'s str,
     ) -> Result<TextResultsetStream<'s, Stream>, CommunicationError>
     where
-        Stream: AsyncReadExt,
+        Stream: AsyncRead,
     {
         match self.query(query).await? {
             QueryCommandResponse::Resultset { column_count } => self
@@ -419,7 +415,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         column_count: usize,
     ) -> std::io::Result<TextResultsetStream<'s, Stream>>
     where
-        Stream: AsyncReadExt,
+        Stream: AsyncRead,
     {
         TextResultsetStream::new(&mut self.stream, column_count, self.capability).await
     }
@@ -429,7 +425,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         column_count: usize,
     ) -> std::io::Result<BinaryResultsetStream<'s, Stream>>
     where
-        Stream: AsyncReadExt,
+        Stream: AsyncRead,
     {
         BinaryResultsetStream::new(&mut self.stream, self.capability, column_count).await
     }
@@ -511,7 +507,7 @@ pub struct Statement<'c, C: SharedMysqlClient<'c>> {
     client: &'c C,
     statement_id: u32,
 }
-impl<Stream: AsyncWriteExt + AsyncReadExt + Unpin> SharedClient<Stream> {
+impl<Stream: AsyncWriteExt + AsyncRead + Unpin> SharedClient<Stream> {
     pub async fn prepare<'c, 's: 'c>(
         &'c self,
         statement: &'s str,
@@ -560,7 +556,7 @@ where
 
     pub async fn reset(&mut self) -> Result<(), CommunicationError>
     where
-        <C::Client as GenericClient>::Stream: AsyncReadExt,
+        <C::Client as GenericClient>::Stream: AsyncRead,
     {
         let mut c = self.client.lock_client();
         let cap = c.capability();
@@ -583,7 +579,7 @@ where
         rebound_parameters: bool,
     ) -> std::io::Result<StmtExecuteResult>
     where
-        <C::Client as GenericClient>::Stream: AsyncReadExt,
+        <C::Client as GenericClient>::Stream: AsyncRead,
     {
         let mut c = self.client.lock_client();
         let cap = c.capability();

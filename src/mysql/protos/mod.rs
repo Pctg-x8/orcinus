@@ -3,9 +3,7 @@ use std::io::Write;
 
 use futures_util::TryFutureExt;
 use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::DefFormatStruct;
 use crate::ReadCounted;
@@ -37,7 +35,7 @@ impl PacketHeader {
 
     pub async fn write(
         &self,
-        writer: &mut (impl AsyncWriteExt + Unpin + ?Sized),
+        writer: &mut (impl AsyncWrite + Unpin + ?Sized),
     ) -> std::io::Result<()> {
         writer.write_all(&self.serialize_bytes()).await
     }
@@ -48,7 +46,7 @@ impl PacketHeader {
 }
 
 pub async fn write_packet(
-    writer: &mut (impl AsyncWriteExt + Unpin + ?Sized),
+    writer: &mut (impl AsyncWrite + Unpin + ?Sized),
     payload: &[u8],
     sequence_id: u8,
 ) -> std::io::Result<()> {
@@ -73,7 +71,7 @@ pub fn write_packet_sync(
     writer.write_all(payload)
 }
 
-pub async fn drop_packet(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<()> {
+pub async fn drop_packet(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<()> {
     let header = format::PacketHeader.read_format(reader).await?;
     let _discard = format::Bytes(header.payload_length as _)
         .read_format(reader)
@@ -102,7 +100,7 @@ impl<T: ClientPacket + ?Sized> ClientPacket for Box<T> {
 pub trait ClientPacketSendExt: ClientPacket {
     fn write_packet<'a>(
         &'a self,
-        writer: &'a mut (impl AsyncWriteExt + Unpin + ?Sized),
+        writer: &'a mut (impl AsyncWrite + Unpin + ?Sized),
         sequence_id: u8,
     ) -> LocalBoxFuture<'a, std::io::Result<()>> {
         async move {
@@ -225,14 +223,14 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
+    pub async fn read(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         let first_byte = reader.read_u8().await?;
         Self::read_ahead(first_byte, reader).await
     }
 
     pub async fn read_ahead(
         first_byte: u8,
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
@@ -275,7 +273,7 @@ impl LengthEncodedInteger {
 
     pub async fn write(
         &self,
-        writer: &mut (impl AsyncWriteExt + Unpin + ?Sized),
+        writer: &mut (impl AsyncWrite + Unpin + ?Sized),
     ) -> std::io::Result<()> {
         if self.0 < 251 {
             writer.write_u8(self.0 as _).await
@@ -356,7 +354,7 @@ DefFormatStruct!(RawOKPacketCommonHeader(RawOKPacketCommonHeaderFormat) {
 });
 impl OKPacket {
     pub async fn expected_read(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_format(reader).await?;
@@ -390,7 +388,7 @@ impl OKPacket {
 
     pub async fn read(
         payload_size: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let ch = RawOKPacketCommonHeaderFormat.read_format(reader).await?;
@@ -516,7 +514,7 @@ impl ErrPacket {
 
     pub async fn read(
         payload_size: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let code = format::U16.read_format(reader).await?;
@@ -592,7 +590,7 @@ impl EOFPacket41 {
     );
 
     pub async fn expected_read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         EOFPacket41::RAW_EXPECTED_FULL_FORMAT
             .read_format(reader)
@@ -614,7 +612,7 @@ impl format::ProtocolFormatFragment for EOFPacket41Format {
 }
 impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for EOFPacket41Format
 where
-    R: AsyncReadExt + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + ?Sized + 'r,
 {
     type ReaderF = futures_util::future::MapOk<
         <RawEOFPacket41Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
@@ -640,7 +638,7 @@ impl From<(ErrPacket, u8)> for GenericOKErrPacket {
 }
 impl GenericOKErrPacket {
     pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_format(reader).await?;

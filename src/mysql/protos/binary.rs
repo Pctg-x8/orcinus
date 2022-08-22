@@ -2,7 +2,7 @@
 
 use std::io::Read;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncRead;
 
 use crate::{ReadCounted, ReadCountedSync};
 
@@ -309,7 +309,7 @@ impl BinaryResultsetRow {
     pub async fn read(
         payload_length: usize,
         column_count: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
     ) -> std::io::Result<Self> {
         let null_bitmap = format::Bytes((column_count + 7 + 2) / 8)
             .read_format(reader)
@@ -396,7 +396,7 @@ impl BinaryResultset41 {
         format::Mapped(EOFPacket41Format, Self::EOF);
 
     pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<Self> {

@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 
 use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
 
@@ -131,7 +131,7 @@ impl From<RawStmtPrepareOk> for StmtPrepareOk {
     }
 }
 impl StmtPrepareOk {
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
+    pub async fn read(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         RawStmtPrepareOkFormat
             .read_format(reader)
             .await

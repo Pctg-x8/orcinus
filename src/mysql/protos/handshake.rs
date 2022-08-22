@@ -3,7 +3,7 @@ use std::io::Read;
 
 use futures_util::future::LocalBoxFuture;
 use futures_util::{FutureExt, TryFutureExt};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
@@ -52,7 +52,7 @@ impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
 }
 impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV10ShortFormat
 where
-    R: AsyncReadExt + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + ?Sized + 'r,
 {
     type ReaderF = futures_util::future::MapOk<
         <RawHandshakeV10ShortProtocolFormat as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
@@ -84,7 +84,7 @@ DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
 impl HandshakeV10Long {
     pub async fn read_additional(
         short: HandshakeV10Short,
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         let head = RawHandshakeV10ExtHeadProtocolFormat
             .read_format(reader)
@@ -188,7 +188,7 @@ impl format::ProtocolFormatFragment for HandshakeV9Format {
 }
 impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV9Format
 where
-    R: AsyncReadExt + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + ?Sized + 'r,
 {
     type ReaderF = futures_util::future::MapOk<
         <RawHandshakeV9Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
@@ -208,7 +208,7 @@ pub enum Handshake {
 }
 impl Handshake {
     pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<(Self, u8)> {
         ReadAsync!(reader => {
             packet_header <- format::PacketHeader,
@@ -408,7 +408,7 @@ impl ClientPacketIO for PublicKeyRequest {
 impl PublicKeyRequest {
     pub async fn request_async(
         &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        stream: &mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         sequence_id: u8,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<AuthMoreDataResponse> {
@@ -429,7 +429,7 @@ impl AuthMoreData {
     }
 
     pub async fn expacted_read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
@@ -450,7 +450,7 @@ impl AuthMoreData {
 
     pub async fn read(
         payload_length: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
     ) -> std::io::Result<Self> {
         Self::format(payload_length - reader.read_bytes())
             .read_format(reader)

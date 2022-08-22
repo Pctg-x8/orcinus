@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use rsa::{pkcs8::DecodePublicKey, PaddingScheme, PublicKey, RsaPublicKey};
 use sha1::Sha1;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use x509_parser::prelude::parse_x509_pem;
 
 use crate::{
@@ -26,7 +26,7 @@ impl<'s> super::Authentication<'s> for SHA256<'_> {
 
     fn run(
         &'s self,
-        _stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        _stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         _con_info: &'s super::ConnectionInfo,
         _first_sequence_id: u8,
     ) -> Self::OperationF {
@@ -75,7 +75,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {

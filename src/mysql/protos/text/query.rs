@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 
 use crate::{
     protos::{
@@ -194,7 +194,7 @@ impl From<RawColumnDefinition41ForFieldList> for ColumnDefinition41 {
 }
 impl ColumnDefinition41 {
     pub async fn read_packet_for_field_list(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         RawColumnDefinition41ForFieldListFormat
             .read_format(reader)
@@ -310,7 +310,7 @@ impl Resultset41 {
         format::Mapped(EOFPacket41Format, Self::EOF);
 
     pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_format(reader).await?;

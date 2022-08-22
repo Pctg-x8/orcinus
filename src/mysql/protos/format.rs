@@ -304,7 +304,7 @@ impl<R> ReadNullTerminatedString<R> {
 }
 impl<R> std::future::Future for ReadNullTerminatedString<R>
 where
-    R: AsyncReadExt + Unpin,
+    R: AsyncRead + Unpin,
 {
     type Output = std::io::Result<String>;
 

@@ -5,8 +5,7 @@ mod sha256;
 use std::io::Read;
 use std::io::Write;
 
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::protos::CapabilityFlags;
 use crate::protos::ClientPacket;
@@ -63,7 +62,7 @@ pub trait Authentication<'s> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         con_info: &'s ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF;

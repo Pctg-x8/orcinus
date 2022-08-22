@@ -1,6 +1,6 @@
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY as SHA1};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     protos::{ClientPacketSendExt, GenericOKErrPacket, OKPacket},
@@ -32,7 +32,7 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {

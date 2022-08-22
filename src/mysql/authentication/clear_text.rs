@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 
 use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     protos::{ClientPacketSendExt, GenericOKErrPacket, OKPacket},
@@ -15,7 +15,7 @@ impl<'s> super::Authentication<'s> for ClearText {
 
     fn run(
         &'s self,
-        stream: &'s mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
         con_info: &'s super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Self::OperationF {
