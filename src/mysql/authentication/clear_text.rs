@@ -4,7 +4,7 @@ use futures_util::{future::LocalBoxFuture, FutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    protos::{ClientPacketSendExt, GenericOKErrPacket, OKPacket},
+    protos::{write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket, ReceivePacket},
     CommunicationError,
 };
 
@@ -24,13 +24,15 @@ impl<'s> super::Authentication<'s> for ClearText {
             buf.extend(con_info.password.bytes());
             buf.push(0);
 
-            con_info
-                .make_handshake_response(&buf, Some(Self::NAME))
-                .write_packet(stream, first_sequence_id)
-                .await?;
+            write_packet(
+                stream,
+                &con_info.make_handshake_response(&buf, Some(Self::NAME)),
+                first_sequence_id,
+            )
+            .await?;
             stream.flush().await?;
             let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)
+                GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
                     .await?
                     .into_result()?;
 
@@ -49,12 +51,14 @@ impl<'s> super::Authentication<'s> for ClearText {
         buf.extend(con_info.password.bytes());
         buf.push(0);
 
-        con_info
-            .make_handshake_response(&buf, Some(Self::NAME))
-            .write_packet_sync(stream, first_sequence_id)?;
+        write_packet_sync(
+            stream,
+            &con_info.make_handshake_response(&buf, Some(Self::NAME)),
+            first_sequence_id,
+        )?;
         stream.flush()?;
         let (resp, sequence_id) =
-            GenericOKErrPacket::read_packet_sync(stream, con_info.client_capabilities)?
+            GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
                 .into_result()?;
 
         Ok((resp, sequence_id))

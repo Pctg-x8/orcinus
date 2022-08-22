@@ -3,17 +3,14 @@ use std::io::Read;
 
 use futures_util::future::LocalBoxFuture;
 use futures_util::{FutureExt, TryFutureExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncRead;
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
 use crate::{DefFormatStruct, ReadAsync, ReadCountedSync, ReadSync};
 
 use super::capabilities::CapabilityFlags;
-use super::{
-    AsyncReceivePacket, ClientPacketIO, ClientPacketSendExt, ErrPacket, LengthEncodedInteger,
-    ReceivePacket,
-};
+use super::{AsyncReceivePacket, ClientPacketIO, ErrPacket, LengthEncodedInteger, ReceivePacket};
 
 #[derive(Debug)]
 pub struct HandshakeV10Short {
@@ -404,18 +401,6 @@ impl super::ClientPacket for PublicKeyRequest {
 }
 impl ClientPacketIO for PublicKeyRequest {
     type Receiver = AuthMoreDataResponse;
-}
-impl PublicKeyRequest {
-    pub async fn request_async(
-        &self,
-        stream: &mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
-        sequence_id: u8,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<AuthMoreDataResponse> {
-        self.write_packet(stream, sequence_id).await?;
-        stream.flush().await?;
-        AuthMoreDataResponse::read_packet_async(stream, client_capability).await
-    }
 }
 
 #[repr(transparent)]

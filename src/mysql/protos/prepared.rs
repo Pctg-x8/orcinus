@@ -8,7 +8,7 @@ use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
     serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
-    OKPacket, Value,
+    GenericOKErrPacket, OKPacket, Value,
 };
 
 pub struct StmtPrepareCommand<'s>(pub &'s str);
@@ -45,6 +45,9 @@ impl super::ClientPacket for StmtResetCommand {
 
         sink
     }
+}
+impl super::ClientPacketIO for StmtResetCommand {
+    type Receiver = GenericOKErrPacket;
 }
 
 #[repr(transparent)]

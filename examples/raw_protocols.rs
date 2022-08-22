@@ -1,8 +1,5 @@
 use futures_util::TryStreamExt;
-use orcinus::{
-    authentication::Authentication,
-    protos::{AsyncReceivePacket, ClientPacketSendExt},
-};
+use orcinus::{authentication::Authentication, protos::AsyncReceivePacket};
 use tokio::io::AsyncWriteExt;
 
 #[tokio::main]
@@ -51,34 +48,40 @@ async fn main() {
             );
 
             if capability.support_41_protocol() {
-                orcinus::protos::HandshakeResponse41 {
-                    capability,
-                    max_packet_size: 16777216,
-                    character_set: 0xff,
-                    username: "root",
-                    auth_response: &auth_response,
-                    database: Some("test"),
-                    auth_plugin_name,
-                    connect_attrs: Default::default(),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse41 {
+                        capability,
+                        max_packet_size: 16777216,
+                        character_set: 0xff,
+                        username: "root",
+                        auth_response: &auth_response,
+                        database: Some("test"),
+                        auth_plugin_name,
+                        connect_attrs: Default::default(),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             } else {
-                orcinus::protos::HandshakeResponse320 {
-                    capability,
-                    max_packet_size: 16777216,
-                    username: "root",
-                    auth_response: &auth_response,
-                    database: Some("test"),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse320 {
+                        capability,
+                        max_packet_size: 16777216,
+                        username: "root",
+                        auth_response: &auth_response,
+                        database: Some("test"),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             }
             stream.flush().await.expect("Failed to flush stream");
 
-            orcinus::protos::GenericOKErrPacket::read_packet(&mut stream, capability)
+            orcinus::protos::GenericOKErrPacket::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read handshake result")
                 .into_result()
@@ -86,34 +89,40 @@ async fn main() {
         }
         Some(x) if x == orcinus::authentication::ClearText::NAME => {
             if capability.support_41_protocol() {
-                orcinus::protos::HandshakeResponse41 {
-                    capability,
-                    max_packet_size: 16777216,
-                    character_set: 0xff,
-                    username: "root",
-                    auth_response: b"root",
-                    database: Some("test"),
-                    auth_plugin_name,
-                    connect_attrs: Default::default(),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse41 {
+                        capability,
+                        max_packet_size: 16777216,
+                        character_set: 0xff,
+                        username: "root",
+                        auth_response: b"root",
+                        database: Some("test"),
+                        auth_plugin_name,
+                        connect_attrs: Default::default(),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             } else {
-                orcinus::protos::HandshakeResponse320 {
-                    capability,
-                    max_packet_size: 16777216,
-                    username: "root",
-                    auth_response: b"root",
-                    database: Some("test"),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse320 {
+                        capability,
+                        max_packet_size: 16777216,
+                        username: "root",
+                        auth_response: b"root",
+                        database: Some("test"),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             }
             stream.flush().await.expect("Failed to flush stream");
 
-            orcinus::protos::GenericOKErrPacket::read_packet(&mut stream, capability)
+            orcinus::protos::GenericOKErrPacket::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read handshake result")
                 .into_result()
@@ -128,28 +137,34 @@ async fn main() {
             );
 
             if capability.support_41_protocol() {
-                orcinus::protos::HandshakeResponse41 {
-                    capability,
-                    max_packet_size: 16777216,
-                    character_set: 0xff,
-                    username: "root",
-                    auth_response: &auth_response,
-                    database: Some("test"),
-                    auth_plugin_name,
-                    connect_attrs: Default::default(),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse41 {
+                        capability,
+                        max_packet_size: 16777216,
+                        character_set: 0xff,
+                        username: "root",
+                        auth_response: &auth_response,
+                        database: Some("test"),
+                        auth_plugin_name,
+                        connect_attrs: Default::default(),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             } else {
-                orcinus::protos::HandshakeResponse320 {
-                    capability,
-                    max_packet_size: 16777216,
-                    username: "root",
-                    auth_response: &auth_response,
-                    database: Some("test"),
-                }
-                .write_packet(&mut stream, sequence_id + 1)
+                orcinus::protos::write_packet(
+                    &mut stream,
+                    &orcinus::protos::HandshakeResponse320 {
+                        capability,
+                        max_packet_size: 16777216,
+                        username: "root",
+                        auth_response: &auth_response,
+                        database: Some("test"),
+                    },
+                    sequence_id + 1,
+                )
                 .await
                 .expect("Failed to send handshake response");
             }
@@ -163,7 +178,7 @@ async fn main() {
                     .expect("Failed to auth");
             assert_eq!(d, [0x03]); // 0x03 = fast auth ok
 
-            orcinus::protos::GenericOKErrPacket::read_packet(&mut stream, capability)
+            orcinus::protos::GenericOKErrPacket::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read handshake result")
                 .into_result()
@@ -174,10 +189,13 @@ async fn main() {
     };
     println!("connection: {resp:?}");
 
-    orcinus::protos::QueryCommand("Select * from test_data")
-        .write_packet(&mut stream, 0)
-        .await
-        .expect("Failed to send query command");
+    orcinus::protos::write_packet(
+        &mut stream,
+        &orcinus::protos::QueryCommand("Select * from test_data"),
+        0,
+    )
+    .await
+    .expect("Failed to send query command");
     stream.flush().await.expect("Failed to flush buffer");
     let qc_result =
         orcinus::protos::QueryCommandResponse::read_packet_async(&mut stream, capability)
@@ -230,10 +248,13 @@ async fn main() {
         }
     }
 
-    orcinus::protos::StmtPrepareCommand("Select * from test_data where id=?")
-        .write_packet(&mut stream, 0)
-        .await
-        .expect("Failed to write prepare command");
+    orcinus::protos::write_packet(
+        &mut stream,
+        &orcinus::protos::StmtPrepareCommand("Select * from test_data where id=?"),
+        0,
+    )
+    .await
+    .expect("Failed to write prepare command");
     stream.flush().await.expect("Failed to flush stream");
     let resp = orcinus::protos::StmtPrepareResult::read_packet_async(&mut stream, capability)
         .await
@@ -271,13 +292,16 @@ async fn main() {
     println!("columns: {columns:#?}");
 
     let parameters = [(orcinus::protos::Value::Long(7), false)];
-    orcinus::protos::StmtExecuteCommand {
-        statement_id: resp.statement_id,
-        flags: orcinus::protos::StmtExecuteFlags::new(),
-        parameters: &parameters,
-        requires_rebound_parameters: true,
-    }
-    .write_packet(&mut stream, 0)
+    orcinus::protos::write_packet(
+        &mut stream,
+        &orcinus::protos::StmtExecuteCommand {
+            statement_id: resp.statement_id,
+            flags: orcinus::protos::StmtExecuteFlags::new(),
+            parameters: &parameters,
+            requires_rebound_parameters: true,
+        },
+        0,
+    )
     .await
     .expect("Failed to write execute packet");
     stream.flush().await.expect("Failed to flush stream");
@@ -318,13 +342,15 @@ async fn main() {
         );
     }
 
-    orcinus::protos::StmtCloseCommand(resp.statement_id)
-        .write_packet(&mut stream, 0)
-        .await
-        .expect("Failed to write stmt close command");
+    orcinus::protos::write_packet(
+        &mut stream,
+        &orcinus::protos::StmtCloseCommand(resp.statement_id),
+        0,
+    )
+    .await
+    .expect("Failed to write stmt close command");
 
-    orcinus::protos::QuitCommand
-        .write_packet(&mut stream, 0)
+    orcinus::protos::write_packet(&mut stream, &orcinus::protos::QuitCommand, 0)
         .await
         .expect("Failed to send quit command");
     stream.flush().await.expect("Failed to flush buffer");

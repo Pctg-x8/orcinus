@@ -9,8 +9,7 @@ use x509_parser::prelude::parse_x509_pem;
 use crate::{
     protos::{
         request, request_async, write_packet, write_packet_sync, AsyncReceivePacket, AuthMoreData,
-        AuthMoreDataResponse, ClientPacketSendExt, GenericOKErrPacket, OKPacket, PublicKeyRequest,
-        ReceivePacket,
+        AuthMoreDataResponse, GenericOKErrPacket, OKPacket, PublicKeyRequest, ReceivePacket,
     },
     CommunicationError,
 };
@@ -83,13 +82,15 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             if con_info.password.is_empty() {
                 // empty password authentication
 
-                con_info
-                    .make_handshake_response(&[], Some(Self::NAME))
-                    .write_packet(stream, first_sequence_id)
-                    .await?;
+                write_packet(
+                    stream,
+                    &con_info.make_handshake_response(&[], Some(Self::NAME)),
+                    first_sequence_id,
+                )
+                .await?;
                 stream.flush().await?;
                 let (resp, sequence_id) =
-                    GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)
+                    GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
                         .await?
                         .into_result()?;
 
@@ -103,10 +104,12 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                 &self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1],
             );
 
-            con_info
-                .make_handshake_response(&auth_response, Some(Self::NAME))
-                .write_packet(stream, first_sequence_id)
-                .await?;
+            write_packet(
+                stream,
+                &con_info.make_handshake_response(&auth_response, Some(Self::NAME)),
+                first_sequence_id,
+            )
+            .await?;
             stream.flush().await?;
             let (AuthMoreData(resp), last_sequence_id) =
                 AuthMoreDataResponse::read_packet_async(stream, con_info.client_capabilities)
@@ -115,7 +118,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
             if resp == [0x03] {
                 // ok
-                return GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)
+                return GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
                     .await?
                     .into_result()
                     .map_err(From::from);
@@ -163,7 +166,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
             write_packet(stream, &auth_response, last_sequence_id + 1).await?;
             stream.flush().await?;
-            GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)
+            GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
                 .await?
                 .into_result()
                 .map_err(From::from)
@@ -180,12 +183,14 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
         if con_info.password.is_empty() {
             // empty password authentication
 
-            con_info
-                .make_handshake_response(&[], Some(Self::NAME))
-                .write_packet_sync(stream, first_sequence_id)?;
+            write_packet_sync(
+                stream,
+                &con_info.make_handshake_response(&[], Some(Self::NAME)),
+                first_sequence_id,
+            )?;
             stream.flush()?;
             let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet_sync(stream, con_info.client_capabilities)?
+                GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
                     .into_result()?;
 
             return Ok((resp, sequence_id));
@@ -198,9 +203,11 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             &self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1],
         );
 
-        con_info
-            .make_handshake_response(&auth_response, Some(Self::NAME))
-            .write_packet_sync(stream, first_sequence_id)?;
+        write_packet_sync(
+            stream,
+            &con_info.make_handshake_response(&auth_response, Some(Self::NAME)),
+            first_sequence_id,
+        )?;
         stream.flush()?;
         let (AuthMoreData(resp), last_sequence_id) =
             AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)?
@@ -208,7 +215,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
         if resp == [0x03] {
             // ok
-            return GenericOKErrPacket::read_packet_sync(stream, con_info.client_capabilities)?
+            return GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
                 .into_result()
                 .map_err(From::from);
         }
@@ -251,7 +258,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
 
         write_packet_sync(stream, &auth_response, last_sequence_id + 1)?;
         stream.flush()?;
-        GenericOKErrPacket::read_packet_sync(stream, con_info.client_capabilities)?
+        GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
             .into_result()
             .map_err(From::from)
     }

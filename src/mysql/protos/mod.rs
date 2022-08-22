@@ -1,8 +1,9 @@
 use std::io::Read;
 use std::io::Write;
 
+use futures_util::future::LocalBoxFuture;
+use futures_util::FutureExt;
 use futures_util::TryFutureExt;
-use futures_util::{future::LocalBoxFuture, FutureExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::DefFormatStruct;
@@ -36,9 +37,11 @@ impl PacketHeader {
 
 pub async fn write_packet(
     writer: &mut (impl AsyncWrite + Unpin + ?Sized),
-    payload: &[u8],
+    payload: &(impl ClientPacket + ?Sized),
     sequence_id: u8,
 ) -> std::io::Result<()> {
+    let payload = payload.serialize_payload();
+
     writer
         .write_all(
             &PacketHeader {
@@ -48,13 +51,15 @@ pub async fn write_packet(
             .serialize_bytes(),
         )
         .await?;
-    writer.write_all(payload).await
+    writer.write_all(&payload).await
 }
 pub fn write_packet_sync(
     writer: &mut (impl Write + ?Sized),
-    payload: &[u8],
+    payload: &(impl ClientPacket + ?Sized),
     sequence_id: u8,
 ) -> std::io::Result<()> {
+    let payload = payload.serialize_payload();
+
     writer.write_all(
         &PacketHeader {
             payload_length: payload.len() as _,
@@ -62,7 +67,7 @@ pub fn write_packet_sync(
         }
         .serialize_bytes(),
     )?;
-    writer.write_all(payload)
+    writer.write_all(&payload)
 }
 
 pub async fn drop_packet(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<()> {
@@ -89,32 +94,16 @@ impl<T: ClientPacket + ?Sized> ClientPacket for Box<T> {
         T::serialize_payload(self)
     }
 }
-
-/// Packet sending utility.
-pub trait ClientPacketSendExt: ClientPacket {
-    fn write_packet<'a>(
-        &'a self,
-        writer: &'a mut (impl AsyncWrite + Unpin + ?Sized),
-        sequence_id: u8,
-    ) -> LocalBoxFuture<'a, std::io::Result<()>> {
-        async move {
-            let payload = self.serialize_payload();
-
-            write_packet(writer, &payload, sequence_id).await
-        }
-        .boxed_local()
-    }
-
-    fn write_packet_sync(
-        &self,
-        writer: &mut (impl Write + ?Sized),
-        sequence_id: u8,
-    ) -> std::io::Result<()> {
-        write_packet_sync(writer, &self.serialize_payload(), sequence_id)
+impl ClientPacket for [u8] {
+    fn serialize_payload(&self) -> Vec<u8> {
+        self.to_owned()
     }
 }
-impl<T: ClientPacket> ClientPacketSendExt for T {}
-
+impl ClientPacket for Vec<u8> {
+    fn serialize_payload(&self) -> Vec<u8> {
+        self.to_owned()
+    }
+}
 /// A packet that knows how to receive it from server synchronously.
 pub trait ReceivePacket: Sized {
     /// Read a packet from reader.
@@ -136,7 +125,7 @@ where
 }
 
 /// Client Packet(Self) - Server Packet Communication Definition.
-pub trait ClientPacketIO: ClientPacketSendExt {
+pub trait ClientPacketIO: ClientPacket {
     /// Client expects this type of packet will be returned from server.
     type Receiver: ReceivePacket;
 }
@@ -150,7 +139,7 @@ pub fn request<P: ClientPacketIO + ?Sized>(
 where
     P::Receiver: ReceivePacket,
 {
-    msg.write_packet_sync(stream, sequence_id)?;
+    write_packet_sync(stream, msg, sequence_id)?;
     stream.flush()?;
     P::Receiver::read_packet(stream, client_capability)
 }
@@ -165,7 +154,7 @@ where
     P::Receiver: AsyncReceivePacket<'r, R>,
     R: AsyncRead + AsyncWrite + Unpin + ?Sized + 'r,
 {
-    msg.write_packet(stream, sequence_id).await?;
+    write_packet(stream, msg, sequence_id).await?;
     stream.flush().await?;
     P::Receiver::read_packet_async(stream, client_capability).await
 }
@@ -631,34 +620,16 @@ impl From<(ErrPacket, u8)> for GenericOKErrPacket {
     }
 }
 impl GenericOKErrPacket {
-    pub async fn read_packet(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
-        client_capabilities: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
-        let mut reader = ReadCounted::new(reader);
-        let first_byte = format::U8.read_format(&mut reader).await?;
-
-        match first_byte {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(|x| (x, packet_header.sequence_id).into()),
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(|x| (x, packet_header.sequence_id).into()),
-            _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+    #[inline]
+    pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
+        match self.0 {
+            Ok(e) => Ok((e, self.1)),
+            Err(e) => Err(e),
         }
     }
-
-    pub fn read_packet_sync(
+}
+impl ReceivePacket for GenericOKErrPacket {
+    fn read_packet(
         reader: &mut (impl Read + ?Sized),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
@@ -682,13 +653,41 @@ impl GenericOKErrPacket {
             _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
         }
     }
+}
+impl<'r, R> AsyncReceivePacket<'r, R> for GenericOKErrPacket
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
 
-    #[inline]
-    pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
-        match self.0 {
-            Ok(e) => Ok((e, self.1)),
-            Err(e) => Err(e),
+    fn read_packet_async(
+        reader: &'r mut R,
+        client_capabilities: CapabilityFlags,
+    ) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let first_byte = format::U8.read_format(&mut reader).await?;
+
+            match first_byte {
+                0xff => ErrPacket::read(
+                    packet_header.payload_length as _,
+                    &mut reader,
+                    client_capabilities,
+                )
+                .await
+                .map(|x| (x, packet_header.sequence_id).into()),
+                0x00 => OKPacket::read(
+                    packet_header.payload_length as _,
+                    &mut reader,
+                    client_capabilities,
+                )
+                .await
+                .map(|x| (x, packet_header.sequence_id).into()),
+                _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+            }
         }
+        .boxed_local()
     }
 }
 

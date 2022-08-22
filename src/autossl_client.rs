@@ -11,8 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::{
     authentication::{self, Authentication},
     protos::{
-        drop_packet, drop_packet_sync, request, request_async, CapabilityFlags,
-        ClientPacketSendExt, ErrPacket, Handshake, QueryCommand, QueryCommandResponse, QuitCommand,
+        drop_packet, drop_packet_sync, request, request_async, write_packet, write_packet_sync,
+        CapabilityFlags, ErrPacket, Handshake, QueryCommand, QueryCommandResponse, QuitCommand,
         SSLRequest, StmtPrepareCommand,
     },
     BinaryResultsetIterator, BinaryResultsetStream, BlockingStatement, CommunicationError,
@@ -131,12 +131,15 @@ impl BlockingClient {
             required_caps.set_support_ssl();
             capability = required_caps & server_caps;
 
-            SSLRequest {
-                capability,
-                max_packet_size: connect_info.base.max_packet_size,
-                character_set: connect_info.base.character_set,
-            }
-            .write_packet_sync(&mut stream, sequence_id + 1)?;
+            write_packet_sync(
+                &mut stream,
+                &SSLRequest {
+                    capability,
+                    max_packet_size: connect_info.base.max_packet_size,
+                    character_set: connect_info.base.character_set,
+                },
+                sequence_id + 1,
+            )?;
             sequence_id += 1;
             stream.flush()?;
             let con = rustls::ClientConnection::new(connect_info.ssl_config.clone(), server_name)?;
@@ -206,7 +209,7 @@ impl BlockingClient {
     }
 
     pub fn quit(&mut self) -> std::io::Result<()> {
-        QuitCommand.write_packet_sync(&mut self.stream, 0)
+        write_packet_sync(&mut self.stream, &QuitCommand, 0)
     }
 
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
@@ -290,12 +293,15 @@ impl Client {
             required_caps.set_support_ssl();
             capability = required_caps & server_caps;
 
-            SSLRequest {
-                capability,
-                max_packet_size: connect_info.base.max_packet_size,
-                character_set: connect_info.base.character_set,
-            }
-            .write_packet(&mut stream, sequence_id + 1)
+            write_packet(
+                &mut stream,
+                &SSLRequest {
+                    capability,
+                    max_packet_size: connect_info.base.max_packet_size,
+                    character_set: connect_info.base.character_set,
+                },
+                sequence_id + 1,
+            )
             .await?;
             sequence_id += 1;
             stream.flush().await?;
@@ -369,7 +375,7 @@ impl Client {
     }
 
     pub async fn quit(&mut self) -> std::io::Result<()> {
-        QuitCommand.write_packet(&mut self.stream, 0).await?;
+        write_packet(&mut self.stream, &QuitCommand, 0).await?;
         Ok(())
     }
 

@@ -5,10 +5,10 @@ use mysql::protos::drop_packet;
 use mysql::protos::drop_packet_sync;
 use mysql::protos::request;
 use mysql::protos::request_async;
+use mysql::protos::write_packet;
+use mysql::protos::write_packet_sync;
 use mysql::protos::CapabilityFlags;
-use mysql::protos::ClientPacketSendExt;
 use mysql::protos::ErrPacket;
-use mysql::protos::GenericOKErrPacket;
 use mysql::protos::QueryCommand;
 use mysql::protos::QueryCommandResponse;
 use mysql::protos::QuitCommand;
@@ -209,7 +209,7 @@ impl<Stream: Write> BlockingClient<Stream> {
     }
 
     pub fn quit(&mut self) -> std::io::Result<()> {
-        QuitCommand.write_packet_sync(&mut self.stream, 0)
+        write_packet_sync(&mut self.stream, &QuitCommand, 0)
     }
 
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
@@ -379,7 +379,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
     }
 
     pub async fn quit(&mut self) -> std::io::Result<()> {
-        QuitCommand.write_packet(&mut self.stream, 0).await?;
+        write_packet(&mut self.stream, &QuitCommand, 0).await?;
         Ok(())
     }
 
@@ -547,9 +547,12 @@ where
     <C::Client as GenericClient>::Stream: AsyncWriteExt + Unpin,
 {
     pub async fn close(self) -> std::io::Result<()> {
-        StmtCloseCommand(self.statement_id)
-            .write_packet(self.client.lock_client().stream_mut(), 0)
-            .await?;
+        write_packet(
+            self.client.lock_client().stream_mut(),
+            &StmtCloseCommand(self.statement_id),
+            0,
+        )
+        .await?;
         std::mem::forget(self);
         Ok(())
     }
@@ -561,14 +564,9 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        StmtResetCommand(self.statement_id)
-            .write_packet(c.stream_mut(), 0)
-            .await?;
-        c.stream_mut().flush().await?;
-        GenericOKErrPacket::read_packet(c.stream_mut(), cap)
+        request_async(&StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
-
         Ok(())
     }
 
@@ -653,8 +651,11 @@ where
     <C::Client as GenericClient>::Stream: Write,
 {
     pub fn close(&mut self) -> std::io::Result<()> {
-        StmtCloseCommand(self.statement_id)
-            .write_packet_sync(self.client.lock_client().stream_mut(), 0)?;
+        write_packet_sync(
+            self.client.lock_client().stream_mut(),
+            &StmtCloseCommand(self.statement_id),
+            0,
+        )?;
         Ok(())
     }
 
@@ -665,10 +666,7 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        StmtResetCommand(self.statement_id).write_packet_sync(c.stream_mut(), 0)?;
-        c.stream_mut().flush()?;
-        GenericOKErrPacket::read_packet_sync(c.stream_mut(), cap)?.into_result()?;
-
+        request(&StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)?.into_result()?;
         Ok(())
     }
 

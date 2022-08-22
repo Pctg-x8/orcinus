@@ -1,5 +1,5 @@
 use futures_util::TryStreamExt;
-use orcinus::{authentication::Authentication, protos::ClientPacketSendExt};
+use orcinus::authentication::Authentication;
 use tokio::io::AsyncWriteExt;
 
 /// do not use this at other of localhost connection
@@ -55,12 +55,15 @@ async fn main() {
     let capability = required_caps & server_caps;
 
     sequence_id += 1;
-    orcinus::protos::SSLRequest {
-        capability: required_caps & server_caps,
-        max_packet_size: 16777216,
-        character_set: 0xff,
-    }
-    .write_packet(&mut stream, sequence_id)
+    orcinus::protos::write_packet(
+        &mut stream,
+        &orcinus::protos::SSLRequest {
+            capability: required_caps & server_caps,
+            max_packet_size: 16777216,
+            character_set: 0xff,
+        },
+        sequence_id,
+    )
     .await
     .expect("Failed to send ssl request");
     stream.flush().await.expect("Failed to flush stream");
