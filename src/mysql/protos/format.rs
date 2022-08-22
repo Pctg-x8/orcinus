@@ -2,7 +2,7 @@
 
 use std::{io::Read, pin::Pin};
 
-use futures_util::{future::LocalBoxFuture, FutureExt, TryFutureExt, pin_mut};
+use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub trait ProtocolFormatFragment {
@@ -790,12 +790,49 @@ macro_rules! DefFormatStruct {
         }
 
         $crate::DefProtocolFormat!($pf_name for $struct_name { $($val <- $fmt),* });
+    };
+    ($vis: vis $struct_name: ident($pf_name: ident) { $($val: ident($vty: ty) <- $fmt: expr),* }) => {
+        $vis struct $struct_name {
+            $($val: $vty),*
+        }
+
+        $crate::DefProtocolFormat!($vis $pf_name for $struct_name { $($val <- $fmt),* });
     }
 }
 #[macro_export]
 macro_rules! DefProtocolFormat {
     ($pf_name: ident for $struct_name: ident { $($val: ident <- $fmt: expr),* }) => {
         struct $pf_name;
+        impl $crate::mysql::protos::format::ProtocolFormatFragment for $pf_name {
+            type Output = $struct_name;
+
+            #[inline]
+            fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+                $crate::ReadSync!(reader => { $($val <- $fmt),* });
+
+                Ok($struct_name { $($val),* })
+            }
+        }
+        impl<'r, R> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
+        where
+            R: tokio::io::AsyncRead + Unpin + ?Sized + 'r
+        {
+            type ReaderF = futures_util::future::LocalBoxFuture<'r, std::io::Result<$struct_name>>;
+
+            #[inline]
+            fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+                use futures_util::future::FutureExt;
+
+                async move {
+                    $crate::ReadAsync!(reader => { $($val <- $fmt),* });
+
+                    Ok($struct_name { $($val),* })
+                }.boxed_local()
+            }
+        }
+    };
+    ($vis: vis $pf_name: ident for $struct_name: ident { $($val: ident <- $fmt: expr),* }) => {
+        $vis struct $pf_name;
         impl $crate::mysql::protos::format::ProtocolFormatFragment for $pf_name {
             type Output = $struct_name;
 

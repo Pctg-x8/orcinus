@@ -6,7 +6,7 @@ use crate::{
     protos::{
         format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
         CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket, InvalidColumnTypeError,
-        LengthEncodedInteger, OKPacket, PacketHeader,
+        LengthEncodedInteger, OKPacket, PacketHeader, EOFPacket41Format,
     },
     DefFormatStruct, ReadCounted, ReadCountedSync,
 };
@@ -284,6 +284,8 @@ impl Resultset41 {
 
         format::Mapped(format::BytesAhead(head_byte, payload_length), make)
     }
+    const EOF_FORMAT: format::Mapped<EOFPacket41Format, fn(EOFPacket41) -> Self> =
+        format::Mapped(EOFPacket41Format, Self::EOF);
 
     pub async fn read_packet(
         reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
@@ -302,7 +304,7 @@ impl Resultset41 {
             )
             .await
             .map(Self::Ok),
-            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
+            0xfe => Self::EOF_FORMAT.read_format(reader.into_inner()).await,
             0x00 => OKPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -341,7 +343,7 @@ impl Resultset41 {
                 client_capability,
             )
             .map(Self::Ok),
-            0xfe => EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF),
+            0xfe => Self::EOF_FORMAT.read_sync(reader.into_inner()),
             0x00 => OKPacket::read_sync(
                 packet_header.payload_length as _,
                 &mut reader,

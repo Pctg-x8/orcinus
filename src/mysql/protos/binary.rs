@@ -8,7 +8,8 @@ use crate::{ReadCounted, ReadCountedSync};
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
-    CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket, Value,
+    CapabilityFlags, ColumnType, EOFPacket41, EOFPacket41Format, ErrPacket, LengthEncodedInteger,
+    OKPacket, Value,
 };
 
 #[repr(transparent)]
@@ -391,6 +392,9 @@ pub enum BinaryResultset41 {
     EOF(EOFPacket41),
 }
 impl BinaryResultset41 {
+    const EOF_FORMAT: format::Mapped<EOFPacket41Format, fn(EOFPacket41) -> Self> =
+        format::Mapped(EOFPacket41Format, Self::EOF);
+
     pub async fn read_packet(
         reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
@@ -409,7 +413,7 @@ impl BinaryResultset41 {
             )
             .await
             .map(Self::Ok),
-            0xfe => EOFPacket41::read(&mut reader).await.map(Self::EOF),
+            0xfe => Self::EOF_FORMAT.read_format(reader.into_inner()).await,
             0xff => ErrPacket::read(
                 packet_header.payload_length as _,
                 &mut reader,
@@ -446,7 +450,7 @@ impl BinaryResultset41 {
                 client_capability,
             )
             .map(Self::Ok),
-            0xfe => EOFPacket41::read_sync(reader.into_inner()).map(Self::EOF),
+            0xfe => Self::EOF_FORMAT.read_sync(reader.into_inner()),
             0xff => ErrPacket::read_sync(
                 packet_header.payload_length as _,
                 &mut reader,

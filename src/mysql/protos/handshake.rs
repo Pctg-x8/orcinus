@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 
+use futures_util::TryFutureExt;
 use tokio::io::AsyncReadExt;
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
@@ -17,7 +18,7 @@ pub struct HandshakeV10Short {
     pub auth_plugin_data_part_1: [u8; 8],
     pub capability_flags: CapabilityFlags,
 }
-DefFormatStruct!(RawHandshakeV10Short(RawHandshakeV10ShortProtocolFormat) {
+DefFormatStruct!(pub RawHandshakeV10Short(RawHandshakeV10ShortProtocolFormat) {
     server_version(String) <- format::NullTerminatedString,
     connection_id(u32) <- format::U32,
     auth_plugin_data_part_1([u8; 8]) <- format::FixedBytes::<8>,
@@ -34,18 +35,30 @@ impl From<RawHandshakeV10Short> for HandshakeV10Short {
         }
     }
 }
-impl HandshakeV10Short {
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
-        RawHandshakeV10ShortProtocolFormat
-            .read_format(reader)
-            .await
-            .map(From::from)
-    }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+pub struct HandshakeV10ShortFormat;
+impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
+    type Output = HandshakeV10Short;
+
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
         RawHandshakeV10ShortProtocolFormat
             .read_sync(reader)
             .map(From::from)
+    }
+}
+impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV10ShortFormat
+where
+    R: AsyncReadExt + Unpin + ?Sized + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawHandshakeV10ShortProtocolFormat as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawHandshakeV10Short) -> HandshakeV10Short,
+    >;
+
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        RawHandshakeV10ShortProtocolFormat
+            .read_format(reader)
+            .map_ok(From::from)
     }
 }
 
@@ -146,7 +159,7 @@ pub struct HandshakeV9 {
     pub connection_id: u32,
     pub scramble: String,
 }
-DefFormatStruct!(RawHandshakeV9(RawHandshakeV9Format) {
+DefFormatStruct!(pub RawHandshakeV9(RawHandshakeV9Format) {
     server_version(String) <- format::NullTerminatedString,
     connection_id(u32) <- format::U32,
     scramble(String) <- format::NullTerminatedString
@@ -160,16 +173,26 @@ impl From<RawHandshakeV9> for HandshakeV9 {
         }
     }
 }
-impl HandshakeV9 {
-    const FORMAT: format::Mapped<RawHandshakeV9Format, fn(RawHandshakeV9) -> HandshakeV9> =
-        format::Mapped(RawHandshakeV9Format, From::from);
 
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
-        Self::FORMAT.read_format(reader).await
+pub struct HandshakeV9Format;
+impl format::ProtocolFormatFragment for HandshakeV9Format {
+    type Output = HandshakeV9;
+
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+        RawHandshakeV9Format.read_sync(reader).map(From::from)
     }
+}
+impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV9Format
+where
+    R: AsyncReadExt + Unpin + ?Sized + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawHandshakeV9Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawHandshakeV9) -> HandshakeV9,
+    >;
 
-    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        Self::FORMAT.read_sync(reader)
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        RawHandshakeV9Format.read_format(reader).map_ok(From::from)
     }
 }
 
@@ -189,10 +212,10 @@ impl Handshake {
         });
 
         let decoded_payload = match protocol_version {
-            9 => HandshakeV9::read(reader).await.map(Self::V9)?,
+            9 => HandshakeV9Format.read_format(reader).await.map(Self::V9)?,
             10 => {
                 let mut reader = ReadCounted::new(reader);
-                let short = HandshakeV10Short::read(&mut reader).await?;
+                let short = HandshakeV10ShortFormat.read_format(&mut reader).await?;
 
                 if packet_header.payload_length as usize > reader.read_bytes() {
                     // more data available
@@ -209,17 +232,17 @@ impl Handshake {
         Ok((decoded_payload, packet_header.sequence_id))
     }
 
-    pub fn read_packet_sync(reader: &mut impl Read) -> std::io::Result<(Self, u8)> {
+    pub fn read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<(Self, u8)> {
         ReadSync!(reader => {
             packet_header <- format::PacketHeader,
             protocol_version <- format::U8
         });
 
         let decoded_payload = match protocol_version {
-            9 => HandshakeV9::read_sync(reader).map(Self::V9)?,
+            9 => HandshakeV9Format.read_sync(reader).map(Self::V9)?,
             10 => {
                 let mut reader = ReadCountedSync::new(reader);
-                let short = HandshakeV10Short::read_sync(&mut reader)?;
+                let short = HandshakeV10ShortFormat.read_sync(&mut reader)?;
 
                 if packet_header.payload_length as usize > reader.read_bytes() {
                     // more data available

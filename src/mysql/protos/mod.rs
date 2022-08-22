@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::io::Write;
 
+use futures_util::TryFutureExt;
 use futures_util::{future::LocalBoxFuture, FutureExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -503,7 +504,7 @@ pub struct EOFPacket41 {
     pub warnings: u16,
     pub status_flags: StatusFlags,
 }
-DefFormatStruct!(RawEOFPacket41(RawEOFPacket41Format) {
+DefFormatStruct!(pub RawEOFPacket41(RawEOFPacket41Format) {
     warnings(u16) <- format::U16,
     status_flags(StatusFlags) <- format::U16.map(StatusFlags)
 });
@@ -524,10 +525,10 @@ fn choice_second<T, U>((_, x): (T, U)) -> U {
 }
 impl EOFPacket41 {
     const RAW_EXPECTED_FULL_FORMAT: format::Mapped<
-        (RawEOFPacket41ExpectHeaderFormat, RawEOFPacket41Format),
-        fn((RawEOFPacket41ExpectHeader, RawEOFPacket41)) -> RawEOFPacket41,
+        (RawEOFPacket41ExpectHeaderFormat, EOFPacket41Format),
+        fn((RawEOFPacket41ExpectHeader, EOFPacket41)) -> EOFPacket41,
     > = format::Mapped(
-        (RawEOFPacket41ExpectHeaderFormat, RawEOFPacket41Format),
+        (RawEOFPacket41ExpectHeaderFormat, EOFPacket41Format),
         choice_second,
     );
 
@@ -537,24 +538,32 @@ impl EOFPacket41 {
         EOFPacket41::RAW_EXPECTED_FULL_FORMAT
             .read_format(reader)
             .await
-            .map(From::from)
     }
 
     pub fn expected_read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        EOFPacket41::RAW_EXPECTED_FULL_FORMAT
-            .read_sync(reader)
-            .map(From::from)
+        EOFPacket41::RAW_EXPECTED_FULL_FORMAT.read_sync(reader)
     }
+}
 
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
-        RawEOFPacket41Format
-            .read_format(reader)
-            .await
-            .map(From::from)
-    }
+pub struct EOFPacket41Format;
+impl format::ProtocolFormatFragment for EOFPacket41Format {
+    type Output = EOFPacket41;
 
-    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
         RawEOFPacket41Format.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for EOFPacket41Format
+where
+    R: AsyncReadExt + Unpin + ?Sized + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawEOFPacket41Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawEOFPacket41) -> EOFPacket41,
+    >;
+
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        RawEOFPacket41Format.read_format(reader).map_ok(From::from)
     }
 }
 
