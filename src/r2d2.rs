@@ -38,6 +38,7 @@ pub struct MysqlConnection<'s, A: ToSocketAddrs> {
     pub server_name: rustls::ServerName,
     pub con_info: super::autossl_client::SSLConnectInfo<'s>,
 }
+#[cfg(feature = "autossl")]
 impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
     for MysqlConnection<'static, A>
 {
