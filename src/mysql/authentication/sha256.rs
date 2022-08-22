@@ -9,7 +9,7 @@ use x509_parser::prelude::parse_x509_pem;
 use crate::{
     protos::{
         write_packet, write_packet_sync, AuthMoreData, AuthMoreDataResponse, ClientPacketSendExt,
-        GenericOKErrPacket, OKPacket,
+        GenericOKErrPacket, OKPacket, PublicKeyRequest,
     },
     CommunicationError,
 };
@@ -125,13 +125,10 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                 if let Some(spki_der) = self.0.server_spki_der {
                     (Cow::Borrowed(spki_der), last_sequence_id)
                 } else {
-                    // note: requesting server pubkey(ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい)
-                    write_packet(stream, &[0x02], last_sequence_id + 1).await?;
-                    stream.flush().await?;
-                    let (AuthMoreData(resp), last_sequence_id) =
-                        AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)
-                            .await?
-                            .into_result()?;
+                    let (AuthMoreData(resp), last_sequence_id) = PublicKeyRequest
+                        .request(stream, last_sequence_id + 1, con_info.client_capabilities)
+                        .await?
+                        .into_result()?;
                     let (_, spki_der) =
                         parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 
@@ -216,12 +213,9 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             if let Some(spki_der) = self.0.server_spki_der {
                 (Cow::Borrowed(spki_der), last_sequence_id)
             } else {
-                // note: requesting server pubkey(ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい)
-                write_packet_sync(stream, &[0x02], last_sequence_id + 1)?;
-                stream.flush()?;
-                let (AuthMoreData(resp), last_sequence_id) =
-                    AuthMoreDataResponse::read_packet_sync(stream, con_info.client_capabilities)?
-                        .into_result()?;
+                let (AuthMoreData(resp), last_sequence_id) = PublicKeyRequest
+                    .request_sync(stream, last_sequence_id + 1, con_info.client_capabilities)?
+                    .into_result()?;
                 let (_, spki_der) =
                     parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 

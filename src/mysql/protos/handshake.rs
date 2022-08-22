@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 
 use futures_util::TryFutureExt;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
 use crate::{DefFormatStruct, ReadAsync, ReadCountedSync, ReadSync};
 
 use super::capabilities::CapabilityFlags;
-use super::{ErrPacket, LengthEncodedInteger};
+use super::{ClientPacketSendExt, ErrPacket, LengthEncodedInteger};
 
 #[derive(Debug)]
 pub struct HandshakeV10Short {
@@ -394,7 +394,31 @@ impl super::ClientPacket for SSLRequest {
 pub struct PublicKeyRequest;
 impl super::ClientPacket for PublicKeyRequest {
     fn serialize_payload(&self) -> Vec<u8> {
+        // note: ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい
         vec![0x02]
+    }
+}
+impl PublicKeyRequest {
+    pub async fn request(
+        &self,
+        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
+        sequence_id: u8,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<AuthMoreDataResponse> {
+        self.write_packet(stream, sequence_id).await?;
+        stream.flush().await?;
+        AuthMoreDataResponse::read_packet(stream, client_capability).await
+    }
+
+    pub fn request_sync(
+        &self,
+        stream: &mut (impl Read + Write + ?Sized),
+        sequence_id: u8,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<AuthMoreDataResponse> {
+        self.write_packet_sync(stream, sequence_id)?;
+        stream.flush()?;
+        AuthMoreDataResponse::read_packet_sync(stream, client_capability)
     }
 }
 
