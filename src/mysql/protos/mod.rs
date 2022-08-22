@@ -32,17 +32,6 @@ impl PacketHeader {
             sequence_id: bytes[3],
         }
     }
-
-    pub async fn write(
-        &self,
-        writer: &mut (impl AsyncWrite + Unpin + ?Sized),
-    ) -> std::io::Result<()> {
-        writer.write_all(&self.serialize_bytes()).await
-    }
-
-    pub fn write_sync(&self, writer: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
-        writer.write_all(&self.serialize_bytes())
-    }
 }
 
 pub async fn write_packet(
@@ -50,12 +39,15 @@ pub async fn write_packet(
     payload: &[u8],
     sequence_id: u8,
 ) -> std::io::Result<()> {
-    PacketHeader {
-        payload_length: payload.len() as _,
-        sequence_id,
-    }
-    .write(writer)
-    .await?;
+    writer
+        .write_all(
+            &PacketHeader {
+                payload_length: payload.len() as _,
+                sequence_id,
+            }
+            .serialize_bytes(),
+        )
+        .await?;
     writer.write_all(payload).await
 }
 pub fn write_packet_sync(
@@ -63,11 +55,13 @@ pub fn write_packet_sync(
     payload: &[u8],
     sequence_id: u8,
 ) -> std::io::Result<()> {
-    PacketHeader {
-        payload_length: payload.len() as _,
-        sequence_id,
-    }
-    .write_sync(writer)?;
+    writer.write_all(
+        &PacketHeader {
+            payload_length: payload.len() as _,
+            sequence_id,
+        }
+        .serialize_bytes(),
+    )?;
     writer.write_all(payload)
 }
 
