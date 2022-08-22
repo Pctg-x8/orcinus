@@ -8,8 +8,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     protos::{
-        BinaryResultset41, BinaryResultsetRow, CapabilityFlags, ColumnDefinition41, ColumnType,
-        EOFPacket41, Resultset41, ResultsetRow,
+        AsyncReceivePacket, BinaryResultset41, BinaryResultsetRow, CapabilityFlags,
+        ColumnDefinition41, ColumnType, EOFPacket41, ReceivePacket, Resultset41, ResultsetRow,
     },
     CommunicationError,
 };
@@ -68,7 +68,10 @@ where
     ) -> std::io::Result<Self> {
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet_sync(&mut *stream)?);
+            columns.push(ColumnDefinition41::read_packet(
+                &mut *stream,
+                client_capability,
+            )?);
         }
         if !client_capability.support_deprecate_eof() {
             EOFPacket41::expected_read_packet_sync(&mut *stream)?;
@@ -136,7 +139,7 @@ where
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
             columns.push(
-                ColumnDefinition41::read_packet(stream)
+                ColumnDefinition41::read_packet_async(stream, client_capability)
                     .await
                     .expect("Failed to read column def"),
             );
@@ -317,7 +320,10 @@ where
     ) -> std::io::Result<Self> {
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet_sync(&mut *stream)?);
+            columns.push(ColumnDefinition41::read_packet(
+                &mut *stream,
+                client_capability,
+            )?);
         }
         if !client_capability.support_deprecate_eof() {
             EOFPacket41::expected_read_packet_sync(&mut *stream)?;
@@ -466,7 +472,7 @@ where
     ) -> std::io::Result<BinaryResultsetStream<'s, R>> {
         let mut columns = Vec::with_capacity(column_count as _);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet(stream).await?);
+            columns.push(ColumnDefinition41::read_packet_async(stream, client_capability).await?);
         }
 
         Ok(Self {

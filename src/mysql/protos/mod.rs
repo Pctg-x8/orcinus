@@ -3,6 +3,8 @@ use std::io::Write;
 
 use futures_util::TryFutureExt;
 use futures_util::{future::LocalBoxFuture, FutureExt};
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::DefFormatStruct;
@@ -86,6 +88,7 @@ pub fn drop_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<()
     Ok(())
 }
 
+/// The client-side packet serialization.
 pub trait ClientPacket {
     fn serialize_payload(&self) -> Vec<u8>;
 }
@@ -95,6 +98,7 @@ impl<T: ClientPacket + ?Sized> ClientPacket for Box<T> {
     }
 }
 
+/// Packet sending utility.
 pub trait ClientPacketSendExt: ClientPacket {
     fn write_packet<'a>(
         &'a self,
@@ -118,6 +122,61 @@ pub trait ClientPacketSendExt: ClientPacket {
     }
 }
 impl<T: ClientPacket> ClientPacketSendExt for T {}
+
+/// A packet that knows how to receive it from server synchronously.
+pub trait ReceivePacket: Sized {
+    /// Read a packet from reader.
+    fn read_packet(
+        reader: &mut (impl Read + ?Sized),
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self>;
+}
+/// A packet that knows how to receive it from server asynchronously.
+pub trait AsyncReceivePacket<'r, R>: Sized
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    /// Reading task implementation.
+    type ReceiveF: std::future::Future<Output = std::io::Result<Self>> + 'r;
+
+    /// Read a packet from reader.
+    fn read_packet_async(reader: &'r mut R, client_capability: CapabilityFlags) -> Self::ReceiveF;
+}
+
+/// Client Packet(Self) - Server Packet Communication Definition.
+pub trait ClientPacketIO: ClientPacketSendExt {
+    /// Client expects this type of packet will be returned from server.
+    type Receiver: ReceivePacket;
+}
+/// Synchronous communication between client and server.
+pub fn request<P: ClientPacketIO + ?Sized>(
+    msg: &P,
+    stream: &mut (impl Read + Write + ?Sized),
+    sequence_id: u8,
+    client_capability: CapabilityFlags,
+) -> std::io::Result<P::Receiver>
+where
+    P::Receiver: ReceivePacket,
+{
+    msg.write_packet_sync(stream, sequence_id)?;
+    stream.flush()?;
+    P::Receiver::read_packet(stream, client_capability)
+}
+/// Asynchronous communication between client and server.
+pub async fn request_async<'r, R, P: ClientPacketIO + ?Sized>(
+    msg: &P,
+    stream: &'r mut R,
+    sequence_id: u8,
+    client_capability: CapabilityFlags,
+) -> std::io::Result<P::Receiver>
+where
+    P::Receiver: AsyncReceivePacket<'r, R>,
+    R: AsyncRead + AsyncWrite + Unpin + ?Sized + 'r,
+{
+    msg.write_packet(stream, sequence_id).await?;
+    stream.flush().await?;
+    P::Receiver::read_packet_async(stream, client_capability).await
+}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]

@@ -1,12 +1,14 @@
 use std::io::Read;
 
-use tokio::io::AsyncReadExt;
+use futures_util::{future::LocalBoxFuture, FutureExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     protos::{
         format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
-        CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket, InvalidColumnTypeError,
-        LengthEncodedInteger, OKPacket, PacketHeader, EOFPacket41Format,
+        AsyncReceivePacket, CapabilityFlags, ClientPacket, ClientPacketIO, ColumnType, EOFPacket41,
+        EOFPacket41Format, ErrPacket, InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
+        PacketHeader, ReceivePacket,
     },
     DefFormatStruct, ReadCounted, ReadCountedSync,
 };
@@ -20,6 +22,9 @@ impl ClientPacket for QueryCommand<'_> {
 
         sink
     }
+}
+impl ClientPacketIO for QueryCommand<'_> {
+    type Receiver = QueryCommandResponse;
 }
 
 #[derive(Debug)]
@@ -50,47 +55,10 @@ impl QueryCommandResponse {
 
         format::Mapped(format::FixedLengthString(string_length), make)
     }
-
-    pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
-        let mut reader = ReadCounted::new(reader);
-        let head_value = format::U8.read_format(&mut reader).await?;
-
-        match head_value {
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Ok),
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Err),
-            0xfb => {
-                Self::local_infile_format(
-                    packet_header.payload_length as usize - reader.read_bytes(),
-                )
-                .read_format(reader.into_inner())
-                .await
-            }
-            _ => {
-                Self::resultset_format(head_value)
-                    .read_format(reader.into_inner())
-                    .await
-            }
-        }
-    }
-
-    pub fn read_packet_sync(
-        reader: &mut impl Read,
+}
+impl ReceivePacket for QueryCommandResponse {
+    fn read_packet(
+        reader: &mut (impl Read + ?Sized),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(reader)?;
@@ -118,6 +86,50 @@ impl QueryCommandResponse {
         }
     }
 }
+impl<'r, R> AsyncReceivePacket<'r, R> for QueryCommandResponse
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
+
+    fn read_packet_async(reader: &'r mut R, client_capability: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let head_value = format::U8.read_format(&mut reader).await?;
+
+            match head_value {
+                0x00 => OKPacket::read(
+                    packet_header.payload_length as _,
+                    &mut reader,
+                    client_capability,
+                )
+                .await
+                .map(Self::Ok),
+                0xff => ErrPacket::read(
+                    packet_header.payload_length as _,
+                    &mut reader,
+                    client_capability,
+                )
+                .await
+                .map(Self::Err),
+                0xfb => {
+                    Self::local_infile_format(
+                        packet_header.payload_length as usize - reader.read_bytes(),
+                    )
+                    .read_format(reader.into_inner())
+                    .await
+                }
+                _ => {
+                    Self::resultset_format(head_value)
+                        .read_format(reader.into_inner())
+                        .await
+                }
+            }
+        }
+        .boxed_local()
+    }
+}
 
 #[derive(Debug)]
 pub struct ColumnDefinition41 {
@@ -134,7 +146,7 @@ pub struct ColumnDefinition41 {
     pub decimals: u8,
     pub default_values: Option<String>,
 }
-DefFormatStruct!(RawColumnDefinition41(RawColumnDefinition41Format) {
+DefFormatStruct!(pub RawColumnDefinition41(RawColumnDefinition41Format) {
     _packet_header(PacketHeader) <- format::PacketHeader,
     catalog(String) <- format::LengthEncodedString,
     schema(String) <- format::LengthEncodedString,
@@ -181,21 +193,6 @@ impl From<RawColumnDefinition41ForFieldList> for ColumnDefinition41 {
     }
 }
 impl ColumnDefinition41 {
-    pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
-    ) -> std::io::Result<Self> {
-        RawColumnDefinition41Format
-            .read_format(reader)
-            .await
-            .map(From::from)
-    }
-
-    pub fn read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        RawColumnDefinition41Format
-            .read_sync(reader)
-            .map(From::from)
-    }
-
     pub async fn read_packet_for_field_list(
         reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
@@ -221,6 +218,31 @@ impl ColumnDefinition41 {
     #[inline]
     pub unsafe fn type_unchecked(&self) -> ColumnType {
         ColumnType::from_u8_unchecked(self.type_byte)
+    }
+}
+impl ReceivePacket for ColumnDefinition41 {
+    fn read_packet(
+        reader: &mut (impl Read + ?Sized),
+        _client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        RawColumnDefinition41Format
+            .read_sync(reader)
+            .map(From::from)
+    }
+}
+impl<'r, R> AsyncReceivePacket<'r, R> for ColumnDefinition41
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    type ReceiveF = <format::Mapped<
+        RawColumnDefinition41Format,
+        fn(RawColumnDefinition41) -> ColumnDefinition41,
+    > as AsyncProtocolFormatFragment<'r, R>>::ReaderF;
+
+    fn read_packet_async(reader: &'r mut R, _client_capability: CapabilityFlags) -> Self::ReceiveF {
+        RawColumnDefinition41Format
+            .map(Self::from as _)
+            .read_format(reader)
     }
 }
 

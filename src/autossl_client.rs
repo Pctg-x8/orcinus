@@ -11,9 +11,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::{
     authentication::{self, Authentication},
     protos::{
-        drop_packet, drop_packet_sync, CapabilityFlags, ClientPacketSendExt, ErrPacket, Handshake,
-        QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest, StmtPrepareCommand,
-        StmtPrepareResult,
+        drop_packet, drop_packet_sync, request, request_async, CapabilityFlags,
+        ClientPacketSendExt, ErrPacket, Handshake, QueryCommand, QueryCommandResponse, QuitCommand,
+        SSLRequest, StmtPrepareCommand,
     },
     BinaryResultsetIterator, BinaryResultsetStream, BlockingStatement, CommunicationError,
     GenericClient, Statement, TextResultsetIterator, TextResultsetStream,
@@ -210,9 +210,7 @@ impl BlockingClient {
     }
 
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        QueryCommand(query).write_packet_sync(&mut self.stream, 0)?;
-        self.stream.flush()?;
-        QueryCommandResponse::read_packet_sync(&mut self.stream, self.capability)
+        request(&QueryCommand(query), &mut self.stream, 0, self.capability)
     }
 
     pub fn fetch_all<'s>(
@@ -376,11 +374,7 @@ impl Client {
     }
 
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        QueryCommand(query)
-            .write_packet(&mut self.stream, 0)
-            .await?;
-        self.stream.flush().await?;
-        QueryCommandResponse::read_packet(&mut self.stream, self.capability).await
+        request_async(&QueryCommand(query), &mut self.stream, 0, self.capability).await
     }
 
     pub async fn fetch_all<'s>(
@@ -473,11 +467,7 @@ impl SharedClient {
         let mut c = self.lock();
         let cap = c.capability;
 
-        StmtPrepareCommand(statement)
-            .write_packet(&mut c.stream, 0)
-            .await?;
-        c.stream.flush().await?;
-        let resp = StmtPrepareResult::read_packet(&mut c.stream, cap)
+        let resp = request_async(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
 
@@ -513,9 +503,8 @@ impl SharedBlockingClient {
         let mut c = self.lock();
         let cap = c.capability;
 
-        StmtPrepareCommand(statement).write_packet_sync(&mut c.stream, 0)?;
-        c.stream.flush()?;
-        let resp = StmtPrepareResult::read_packet_sync(&mut c.stream, cap)?.into_result()?;
+        let resp =
+            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {

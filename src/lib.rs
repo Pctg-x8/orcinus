@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 
 use mysql::protos::drop_packet;
 use mysql::protos::drop_packet_sync;
+use mysql::protos::request;
+use mysql::protos::request_async;
 use mysql::protos::CapabilityFlags;
 use mysql::protos::ClientPacketSendExt;
 use mysql::protos::ErrPacket;
@@ -15,11 +17,11 @@ use mysql::protos::StmtExecuteCommand;
 use mysql::protos::StmtExecuteFlags;
 use mysql::protos::StmtExecuteResult;
 use mysql::protos::StmtPrepareCommand;
-use mysql::protos::StmtPrepareResult;
 use mysql::protos::StmtResetCommand;
 use mysql::protos::Value;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
@@ -215,9 +217,7 @@ impl<Stream: Write> BlockingClient<Stream> {
     where
         Stream: Read,
     {
-        QueryCommand(query).write_packet_sync(&mut self.stream, 0)?;
-        self.stream.flush()?;
-        QueryCommandResponse::read_packet_sync(&mut self.stream, self.capability)
+        request(&QueryCommand(query), &mut self.stream, 0, self.capability)
     }
 
     pub fn fetch_all<'s>(
@@ -389,13 +389,9 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
 
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
     where
-        Stream: AsyncReadExt,
+        Stream: AsyncRead,
     {
-        QueryCommand(query)
-            .write_packet(&mut self.stream, 0)
-            .await?;
-        self.stream.flush().await?;
-        QueryCommandResponse::read_packet(&mut self.stream, self.capability).await
+        request_async(&QueryCommand(query), &mut self.stream, 0, self.capability).await
     }
 
     pub async fn fetch_all<'s>(
@@ -523,11 +519,7 @@ impl<Stream: AsyncWriteExt + AsyncReadExt + Unpin> SharedClient<Stream> {
         let mut c = self.lock();
         let cap = c.capability;
 
-        StmtPrepareCommand(statement)
-            .write_packet(&mut c.stream, 0)
-            .await?;
-        c.stream.flush().await?;
-        let resp = StmtPrepareResult::read_packet(&mut c.stream, cap)
+        let resp = request_async(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
 
@@ -596,16 +588,18 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        StmtExecuteCommand {
-            statement_id: self.statement_id,
-            flags: StmtExecuteFlags::new(),
-            parameters,
-            requires_rebound_parameters: rebound_parameters,
-        }
-        .write_packet(c.stream_mut(), 0)
-        .await?;
-        c.stream_mut().flush().await?;
-        StmtExecuteResult::read_packet(c.stream_mut(), cap).await
+        request_async(
+            &StmtExecuteCommand {
+                statement_id: self.statement_id,
+                flags: StmtExecuteFlags::new(),
+                parameters,
+                requires_rebound_parameters: rebound_parameters,
+            },
+            c.stream_mut(),
+            0,
+            cap,
+        )
+        .await
     }
 }
 impl<'c, C: SharedMysqlClient<'c>> Drop for Statement<'c, C> {
@@ -632,9 +626,8 @@ impl<Stream: Write + Read> SharedBlockingClient<Stream> {
         let mut c = self.lock();
         let cap = c.capability;
 
-        StmtPrepareCommand(statement).write_packet_sync(&mut c.stream, 0)?;
-        c.stream.flush()?;
-        let resp = StmtPrepareResult::read_packet_sync(&mut c.stream, cap)?.into_result()?;
+        let resp =
+            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
@@ -695,15 +688,17 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        StmtExecuteCommand {
-            statement_id: self.statement_id,
-            flags: StmtExecuteFlags::new(),
-            parameters,
-            requires_rebound_parameters: rebound_parameters,
-        }
-        .write_packet_sync(c.stream_mut(), 0)?;
-        c.stream_mut().flush()?;
-        StmtExecuteResult::read_packet_sync(c.stream_mut(), cap)
+        request(
+            &StmtExecuteCommand {
+                statement_id: self.statement_id,
+                flags: StmtExecuteFlags::new(),
+                parameters,
+                requires_rebound_parameters: rebound_parameters,
+            },
+            c.stream_mut(),
+            0,
+            cap,
+        )
     }
 }
 impl<'c, C: SharedBlockingMysqlClient<'c>> Drop for BlockingStatement<'c, C>

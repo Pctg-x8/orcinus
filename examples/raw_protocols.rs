@@ -1,5 +1,8 @@
 use futures_util::TryStreamExt;
-use orcinus::{authentication::Authentication, protos::ClientPacketSendExt};
+use orcinus::{
+    authentication::Authentication,
+    protos::{AsyncReceivePacket, ClientPacketSendExt},
+};
 use tokio::io::AsyncWriteExt;
 
 #[tokio::main]
@@ -153,7 +156,7 @@ async fn main() {
             stream.flush().await.expect("Failed to flush stream");
 
             let (orcinus::protos::AuthMoreData(d), _) =
-                orcinus::protos::AuthMoreDataResponse::read_packet(&mut stream, capability)
+                orcinus::protos::AuthMoreDataResponse::read_packet_async(&mut stream, capability)
                     .await
                     .expect("Failed to read more data response")
                     .into_result()
@@ -176,9 +179,10 @@ async fn main() {
         .await
         .expect("Failed to send query command");
     stream.flush().await.expect("Failed to flush buffer");
-    let qc_result = orcinus::protos::QueryCommandResponse::read_packet(&mut stream, capability)
-        .await
-        .expect("Failed to read query command result");
+    let qc_result =
+        orcinus::protos::QueryCommandResponse::read_packet_async(&mut stream, capability)
+            .await
+            .expect("Failed to read query command result");
     println!("result: {qc_result:?}");
     let field_count = match qc_result {
         orcinus::protos::QueryCommandResponse::Resultset { column_count } => column_count,
@@ -187,7 +191,7 @@ async fn main() {
     let mut columns = Vec::with_capacity(field_count as _);
     for _ in 0..field_count {
         columns.push(
-            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+            orcinus::protos::ColumnDefinition41::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read column def"),
         );
@@ -231,7 +235,7 @@ async fn main() {
         .await
         .expect("Failed to write prepare command");
     stream.flush().await.expect("Failed to flush stream");
-    let resp = orcinus::protos::StmtPrepareResult::read_packet(&mut stream, capability)
+    let resp = orcinus::protos::StmtPrepareResult::read_packet_async(&mut stream, capability)
         .await
         .expect("Failed to read prepare result packet")
         .into_result()
@@ -240,7 +244,7 @@ async fn main() {
     let mut params = Vec::with_capacity(resp.num_params as _);
     for _ in 0..resp.num_params {
         params.push(
-            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+            orcinus::protos::ColumnDefinition41::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read params packet"),
         );
@@ -253,7 +257,7 @@ async fn main() {
     let mut columns = Vec::with_capacity(resp.num_columns as _);
     for _ in 0..resp.num_columns {
         columns.push(
-            orcinus::protos::ColumnDefinition41::read_packet(&mut stream)
+            orcinus::protos::ColumnDefinition41::read_packet_async(&mut stream, capability)
                 .await
                 .expect("Failed to read params packet"),
         );
@@ -277,7 +281,7 @@ async fn main() {
     .await
     .expect("Failed to write execute packet");
     stream.flush().await.expect("Failed to flush stream");
-    let exec_resp = orcinus::protos::StmtExecuteResult::read_packet(&mut stream, capability)
+    let exec_resp = orcinus::protos::StmtExecuteResult::read_packet_async(&mut stream, capability)
         .await
         .expect("Failed to read stmt execute result");
     let column_count = match exec_resp {

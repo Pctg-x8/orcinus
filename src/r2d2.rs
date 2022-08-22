@@ -3,7 +3,7 @@ use std::{io::Write, net::ToSocketAddrs};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
-    protos::{drop_packet_sync, ClientPacketSendExt, StmtPrepareCommand, StmtPrepareResult},
+    protos::{drop_packet_sync, request, StmtPrepareCommand},
     BlockingStatement, CommunicationError, GenericClient, SharedBlockingMysqlClient,
 };
 
@@ -90,9 +90,8 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlTcpConnec
         let mut c = self.lock();
         let cap = c.capability;
 
-        StmtPrepareCommand(statement).write_packet_sync(&mut c.stream, 0)?;
-        c.stream.flush()?;
-        let resp = StmtPrepareResult::read_packet_sync(&mut c.stream, cap)?.into_result()?;
+        let resp =
+            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
@@ -174,9 +173,8 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlConnectio
         let mut c = self.lock();
         let cap = c.capability();
 
-        StmtPrepareCommand(statement).write_packet_sync(c.stream_mut(), 0)?;
-        c.stream_mut().flush()?;
-        let resp = StmtPrepareResult::read_packet_sync(c.stream_mut(), cap)?.into_result()?;
+        let resp =
+            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {

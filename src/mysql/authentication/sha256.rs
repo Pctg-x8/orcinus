@@ -8,8 +8,9 @@ use x509_parser::prelude::parse_x509_pem;
 
 use crate::{
     protos::{
-        write_packet, write_packet_sync, AuthMoreData, AuthMoreDataResponse, ClientPacketSendExt,
-        GenericOKErrPacket, OKPacket, PublicKeyRequest,
+        request, request_async, write_packet, write_packet_sync, AsyncReceivePacket, AuthMoreData,
+        AuthMoreDataResponse, ClientPacketSendExt, GenericOKErrPacket, OKPacket, PublicKeyRequest,
+        ReceivePacket,
     },
     CommunicationError,
 };
@@ -108,7 +109,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                 .await?;
             stream.flush().await?;
             let (AuthMoreData(resp), last_sequence_id) =
-                AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)
+                AuthMoreDataResponse::read_packet_async(stream, con_info.client_capabilities)
                     .await?
                     .into_result()?;
 
@@ -125,10 +126,14 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
                 if let Some(spki_der) = self.0.server_spki_der {
                     (Cow::Borrowed(spki_der), last_sequence_id)
                 } else {
-                    let (AuthMoreData(resp), last_sequence_id) = PublicKeyRequest
-                        .request(stream, last_sequence_id + 1, con_info.client_capabilities)
-                        .await?
-                        .into_result()?;
+                    let (AuthMoreData(resp), last_sequence_id) = request_async(
+                        &PublicKeyRequest,
+                        stream,
+                        last_sequence_id + 1,
+                        con_info.client_capabilities,
+                    )
+                    .await?
+                    .into_result()?;
                     let (_, spki_der) =
                         parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 
@@ -198,7 +203,7 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             .write_packet_sync(stream, first_sequence_id)?;
         stream.flush()?;
         let (AuthMoreData(resp), last_sequence_id) =
-            AuthMoreDataResponse::read_packet_sync(stream, con_info.client_capabilities)?
+            AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)?
                 .into_result()?;
 
         if resp == [0x03] {
@@ -213,9 +218,13 @@ impl<'s, 'k> super::Authentication<'s> for CachedSHA256<'k> {
             if let Some(spki_der) = self.0.server_spki_der {
                 (Cow::Borrowed(spki_der), last_sequence_id)
             } else {
-                let (AuthMoreData(resp), last_sequence_id) = PublicKeyRequest
-                    .request_sync(stream, last_sequence_id + 1, con_info.client_capabilities)?
-                    .into_result()?;
+                let (AuthMoreData(resp), last_sequence_id) = request(
+                    &PublicKeyRequest,
+                    stream,
+                    last_sequence_id + 1,
+                    con_info.client_capabilities,
+                )?
+                .into_result()?;
                 let (_, spki_der) =
                     parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 

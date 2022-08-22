@@ -1,15 +1,19 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 
-use futures_util::TryFutureExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures_util::future::LocalBoxFuture;
+use futures_util::{FutureExt, TryFutureExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
 use crate::{DefFormatStruct, ReadAsync, ReadCountedSync, ReadSync};
 
 use super::capabilities::CapabilityFlags;
-use super::{ClientPacketSendExt, ErrPacket, LengthEncodedInteger};
+use super::{
+    AsyncReceivePacket, ClientPacketIO, ClientPacketSendExt, ErrPacket, LengthEncodedInteger,
+    ReceivePacket,
+};
 
 #[derive(Debug)]
 pub struct HandshakeV10Short {
@@ -398,8 +402,11 @@ impl super::ClientPacket for PublicKeyRequest {
         vec![0x02]
     }
 }
+impl ClientPacketIO for PublicKeyRequest {
+    type Receiver = AuthMoreDataResponse;
+}
 impl PublicKeyRequest {
-    pub async fn request(
+    pub async fn request_async(
         &self,
         stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin + ?Sized),
         sequence_id: u8,
@@ -407,18 +414,7 @@ impl PublicKeyRequest {
     ) -> std::io::Result<AuthMoreDataResponse> {
         self.write_packet(stream, sequence_id).await?;
         stream.flush().await?;
-        AuthMoreDataResponse::read_packet(stream, client_capability).await
-    }
-
-    pub fn request_sync(
-        &self,
-        stream: &mut (impl Read + Write + ?Sized),
-        sequence_id: u8,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<AuthMoreDataResponse> {
-        self.write_packet_sync(stream, sequence_id)?;
-        stream.flush()?;
-        AuthMoreDataResponse::read_packet_sync(stream, client_capability)
+        AuthMoreDataResponse::read_packet_async(stream, client_capability).await
     }
 }
 
@@ -481,30 +477,13 @@ impl From<(ErrPacket, u8)> for AuthMoreDataResponse {
     }
 }
 impl AuthMoreDataResponse {
-    pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
-        let mut reader = ReadCounted::new(reader);
-        let heading = format::U8.read_format(&mut reader).await?;
-
-        match heading {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(|e| (e, packet_header.sequence_id).into()),
-            0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
-                .await
-                .map(|x| (x, packet_header.sequence_id).into()),
-            _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
-        }
+    #[inline]
+    pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
+        self.0.map(|x| (x, self.1))
     }
-
-    pub fn read_packet_sync(
+}
+impl ReceivePacket for AuthMoreDataResponse {
+    fn read_packet(
         reader: &mut (impl Read + ?Sized),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
@@ -524,10 +503,36 @@ impl AuthMoreDataResponse {
             _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
         }
     }
+}
+impl<'r, R> AsyncReceivePacket<'r, R> for AuthMoreDataResponse
+where
+    R: AsyncRead + Unpin + ?Sized + 'r,
+{
+    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
 
-    #[inline]
-    pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
-        self.0.map(|x| (x, self.1))
+    fn read_packet_async(reader: &'r mut R, client_capability: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let heading = format::U8.read_format(&mut reader).await?;
+
+            match heading {
+                0xff => ErrPacket::read(
+                    packet_header.payload_length as _,
+                    &mut reader,
+                    client_capability,
+                )
+                .await
+                .map(|e| (e, packet_header.sequence_id).into()),
+                0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
+                _ => {
+                    unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}")
+                }
+            }
+        }
+        .boxed_local()
     }
 }
 
