@@ -4,11 +4,11 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     protos::{
-        format::{self, ProtocolFormatFragment},
-        read_lenenc_str, CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket,
-        InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
+        format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
+        CapabilityFlags, ClientPacket, ColumnType, EOFPacket41, ErrPacket, InvalidColumnTypeError,
+        LengthEncodedInteger, OKPacket, PacketHeader,
     },
-    PacketReader, ReadCounted, ReadCountedSync, ReadSync,
+    DefFormatStruct, PacketReader, ReadCounted, ReadCountedSync,
 };
 
 pub struct QueryCommand<'s>(pub &'s str);
@@ -34,9 +34,9 @@ impl QueryCommandResponse {
         reader: &mut (impl PacketReader + Unpin),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let head_value = reader.read_u8().await?;
+        let head_value = format::U8.read_format(&mut reader).await?;
 
         match head_value {
             0x00 => OKPacket::read(
@@ -53,22 +53,16 @@ impl QueryCommandResponse {
             )
             .await
             .map(Self::Err),
-            0xfb => {
-                let fn_len = packet_header.payload_length as usize - reader.read_bytes();
-                let mut fn_bytes = Vec::with_capacity(fn_len);
-                unsafe {
-                    fn_bytes.set_len(fn_len);
-                }
-                reader.read_exact(&mut fn_bytes).await?;
-                Ok(Self::LocalInfileRequest {
-                    filename: unsafe { String::from_utf8_unchecked(fn_bytes) },
-                })
-            }
-            _ => {
-                let LengthEncodedInteger(column_count) =
-                    LengthEncodedInteger::read_ahead(head_value, &mut reader).await?;
-                Ok(Self::Resultset { column_count })
-            }
+            0xfb => format::FixedLengthString(
+                packet_header.payload_length as usize - reader.read_bytes(),
+            )
+            .read_format(reader.into_inner())
+            .await
+            .map(|filename| Self::LocalInfileRequest { filename }),
+            _ => format::LengthEncodedIntegerAhead(head_value)
+                .read_format(reader.into_inner())
+                .await
+                .map(|x| Self::Resultset { column_count: x }),
         }
     }
 
@@ -93,20 +87,14 @@ impl QueryCommandResponse {
                 client_capability,
             )
             .map(Self::Err),
-            0xfb => {
-                let filename = format::FixedLengthString(
-                    packet_header.payload_length as usize - reader.read_bytes(),
-                )
-                .read_sync(&mut reader)?;
-
-                Ok(Self::LocalInfileRequest { filename })
-            }
-            _ => {
-                let column_count =
-                    format::LengthEncodedIntegerAhead(head_value).read_sync(reader.into_inner())?;
-
-                Ok(Self::Resultset { column_count })
-            }
+            0xfb => format::FixedLengthString(
+                packet_header.payload_length as usize - reader.read_bytes(),
+            )
+            .read_sync(&mut reader)
+            .map(|filename| Self::LocalInfileRequest { filename }),
+            _ => format::LengthEncodedIntegerAhead(head_value)
+                .read_sync(reader.into_inner())
+                .map(|x| Self::Resultset { column_count: x }),
         }
     }
 }
@@ -126,102 +114,83 @@ pub struct ColumnDefinition41 {
     pub decimals: u8,
     pub default_values: Option<String>,
 }
+DefFormatStruct!(RawColumnDefinition41(RawColumnDefinition41Format) {
+    _packet_header(PacketHeader) <- format::PacketHeader,
+    catalog(String) <- format::LengthEncodedString,
+    schema(String) <- format::LengthEncodedString,
+    table(String) <- format::LengthEncodedString,
+    org_table(String) <- format::LengthEncodedString,
+    name(String) <- format::LengthEncodedString,
+    org_name(String) <- format::LengthEncodedString,
+    _fixed_length_fields_len(u64) <- format::LengthEncodedInteger.assert_eq(0x0c),
+    character_set(u16) <- format::U16,
+    column_length(u32) <- format::U32,
+    type_byte(u8) <- format::U8,
+    flags(u16) <- format::U16,
+    decimals(u8) <- format::U8,
+    _filler([u8; 2]) <- format::FixedBytes::<2>
+});
+impl From<RawColumnDefinition41> for ColumnDefinition41 {
+    fn from(r: RawColumnDefinition41) -> Self {
+        Self {
+            catalog: r.catalog,
+            schema: r.schema,
+            table: r.table,
+            org_table: r.org_table,
+            name: r.name,
+            org_name: r.org_name,
+            character_set: r.character_set,
+            column_length: r.column_length,
+            type_byte: r.type_byte,
+            flags: r.flags,
+            decimals: r.decimals,
+            default_values: None,
+        }
+    }
+}
+DefFormatStruct!(RawColumnDefinition41ForFieldList(RawColumnDefinition41ForFieldListFormat) {
+    base(RawColumnDefinition41) <- RawColumnDefinition41Format,
+    default_values(String) <- format::LengthEncodedString
+});
+impl From<RawColumnDefinition41ForFieldList> for ColumnDefinition41 {
+    fn from(r: RawColumnDefinition41ForFieldList) -> Self {
+        Self {
+            default_values: Some(r.default_values),
+            ..r.base.into()
+        }
+    }
+}
 impl ColumnDefinition41 {
     pub async fn read_packet(
         reader: &mut (impl PacketReader + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
-        let _ = reader.read_packet_header().await?;
-
-        let catalog = read_lenenc_str(reader).await?;
-        let schema = read_lenenc_str(reader).await?;
-        let table = read_lenenc_str(reader).await?;
-        let org_table = read_lenenc_str(reader).await?;
-        let name = read_lenenc_str(reader).await?;
-        let org_name = read_lenenc_str(reader).await?;
-        let LengthEncodedInteger(fixed_length_fields_len) =
-            LengthEncodedInteger::read(reader).await?;
-        assert_eq!(fixed_length_fields_len, 0x0c);
-        let character_set = reader.read_u16_le().await?;
-        let column_length = reader.read_u32_le().await?;
-        let type_byte = reader.read_u8().await?;
-        let flags = reader.read_u16_le().await?;
-        let decimals = reader.read_u8().await?;
-        let mut _filler = [0u8; 2];
-        reader.read_exact(&mut _filler).await?;
-
-        Ok(Self {
-            catalog,
-            schema,
-            table,
-            org_table,
-            name,
-            org_name,
-            character_set,
-            column_length,
-            type_byte,
-            flags,
-            decimals,
-            default_values: None,
-        })
+        RawColumnDefinition41Format
+            .read_format(reader)
+            .await
+            .map(From::from)
     }
 
     pub fn read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        ReadSync!(reader => {
-            _packet_header <- format::PacketHeader,
-            catalog <- format::LengthEncodedString,
-            schema <- format::LengthEncodedString,
-            table <- format::LengthEncodedString,
-            org_table <- format::LengthEncodedString,
-            name <- format::LengthEncodedString,
-            org_name <- format::LengthEncodedString,
-            _fixed_length_fields_len <- format::LengthEncodedInteger,
-            character_set <- format::U16,
-            column_length <- format::U32,
-            type_byte <- format::U8,
-            flags <- format::U16,
-            decimals <- format::U8,
-            _filler <- format::FixedBytes::<2>
-        });
-        assert_eq!(_fixed_length_fields_len, 0x0c);
-
-        Ok(Self {
-            catalog,
-            schema,
-            table,
-            org_table,
-            name,
-            org_name,
-            character_set,
-            column_length,
-            type_byte,
-            flags,
-            decimals,
-            default_values: None,
-        })
+        RawColumnDefinition41Format
+            .read_sync(reader)
+            .map(From::from)
     }
 
     pub async fn read_packet_for_field_list(
         reader: &mut (impl PacketReader + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
-        let org = Self::read_packet(reader).await?;
-        let default_values = read_lenenc_str(reader).await?;
-
-        Ok(Self {
-            default_values: Some(default_values),
-            ..org
-        })
+        RawColumnDefinition41ForFieldListFormat
+            .read_format(reader)
+            .await
+            .map(From::from)
     }
 
     pub fn read_packet_for_field_list_sync(
         reader: &mut (impl Read + ?Sized),
     ) -> std::io::Result<Self> {
-        let org = Self::read_packet_sync(reader)?;
-        let default_values = format::LengthEncodedString.read_sync(reader)?;
-
-        Ok(Self {
-            default_values: Some(default_values),
-            ..org
-        })
+        RawColumnDefinition41ForFieldListFormat
+            .read_sync(reader)
+            .map(From::from)
     }
 
     #[inline]
@@ -244,19 +213,6 @@ pub enum ResultsetValue<'s> {
 #[derive(Debug)]
 pub struct ResultsetRow(Vec<u8>);
 impl ResultsetRow {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut packet_content = Vec::with_capacity(packet_header.payload_length as _);
-        unsafe {
-            packet_content.set_len(packet_header.payload_length as _);
-        }
-        reader.read_exact(&mut packet_content).await?;
-
-        Ok(Self(packet_content))
-    }
-
     pub fn decompose_values<'s>(&'s self) -> ResultsetValueDecomposer<'s> {
         ResultsetValueDecomposer(std::io::Cursor::new(&self.0))
     }

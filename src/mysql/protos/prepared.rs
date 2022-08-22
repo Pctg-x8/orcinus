@@ -2,12 +2,12 @@ use std::io::Read;
 
 use tokio::io::AsyncReadExt;
 
-use crate::{PacketReader, ReadCounted, ReadCountedSync, ReadSync};
+use crate::{DefFormatStruct, PacketReader, ReadCounted, ReadCountedSync};
 
 use super::{
-    format::{self, ProtocolFormatFragment},
+    format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
     serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
-    LengthEncodedInteger, OKPacket, Value,
+    OKPacket, Value,
 };
 
 pub struct StmtPrepareCommand<'s>(pub &'s str);
@@ -106,46 +106,38 @@ pub struct StmtPrepareOk {
     pub num_params: u16,
     pub warning_count: u16,
 }
+DefFormatStruct!(RawStmtPrepareOk(RawStmtPrepareOkFormat) {
+    statement_id(u32) <- format::U32,
+    num_columns(u16) <- format::U16,
+    num_params(u16) <- format::U16,
+    _filler([u8; 1]) <- format::FixedBytes::<1>,
+    warning_count(u16) <- format::U16
+});
+impl From<RawStmtPrepareOk> for StmtPrepareOk {
+    fn from(r: RawStmtPrepareOk) -> Self {
+        Self {
+            statement_id: r.statement_id,
+            num_columns: r.num_columns,
+            num_params: r.num_params,
+            warning_count: r.warning_count,
+        }
+    }
+}
 impl StmtPrepareOk {
     pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
-        let statement_id = reader.read_u32_le().await?;
-        let num_columns = reader.read_u16_le().await?;
-        let num_params = reader.read_u16_le().await?;
-        let mut _filler = [0u8; 1];
-        reader.read_exact(&mut _filler).await?;
-        let warning_count = reader.read_u16_le().await?;
-
-        Ok(Self {
-            statement_id,
-            num_columns,
-            num_params,
-            warning_count,
-        })
+        RawStmtPrepareOkFormat
+            .read_format(reader)
+            .await
+            .map(From::from)
     }
 
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        ReadSync!(reader => {
-            statement_id <- format::U32,
-            num_columns <- format::U16,
-            num_params <- format::U16,
-            _filler <- format::FixedBytes::<1>,
-            warning_count <- format::U16
-        });
-
-        Ok(Self {
-            statement_id,
-            num_columns,
-            num_params,
-            warning_count,
-        })
+        RawStmtPrepareOkFormat.read_sync(reader).map(From::from)
     }
 }
 
 #[derive(Debug)]
-pub enum StmtPrepareResult {
-    Ok(StmtPrepareOk),
-    Err(ErrPacket),
-}
+pub struct StmtPrepareResult(Result<StmtPrepareOk, ErrPacket>);
 impl StmtPrepareResult {
     pub async fn read_packet(
         reader: &mut (impl PacketReader + Unpin),
@@ -162,8 +154,10 @@ impl StmtPrepareResult {
                 client_capabilities,
             )
             .await
-            .map(Self::Err),
-            0x00 => StmtPrepareOk::read(reader.into_inner()).await.map(Self::Ok),
+            .map(|e| Self(Err(e))),
+            0x00 => StmtPrepareOk::read(reader.into_inner())
+                .await
+                .map(|r| Self(Ok(r))),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -182,18 +176,15 @@ impl StmtPrepareResult {
                 &mut reader,
                 client_capability,
             )
-            .map(Self::Err),
-            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(Self::Ok),
+            .map(|e| Self(Err(e))),
+            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(|x| Self(Ok(x))),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
 
     #[inline]
     pub fn into_result(self) -> Result<StmtPrepareOk, ErrPacket> {
-        match self {
-            Self::Ok(o) => Ok(o),
-            Self::Err(e) => Err(e),
-        }
+        self.0
     }
 }
 
@@ -227,11 +218,10 @@ impl StmtExecuteResult {
             )
             .await
             .map(Self::Err),
-            _ => {
-                let LengthEncodedInteger(column_count) =
-                    LengthEncodedInteger::read_ahead(r1, reader.into_inner()).await?;
-                Ok(Self::Resultset { column_count })
-            }
+            _ => format::LengthEncodedIntegerAhead(r1)
+                .read_format(reader.into_inner())
+                .await
+                .map(|x| Self::Resultset { column_count: x }),
         }
     }
 

@@ -20,6 +20,15 @@ pub trait ProtocolFormatFragment {
     {
         Mapped(self, mapper)
     }
+
+    #[inline]
+    fn assert_eq(self, right: Self::Output) -> AssertEq<Self>
+    where
+        Self: Sized,
+        Self::Output: std::fmt::Debug + Eq,
+    {
+        AssertEq(self, right)
+    }
 }
 
 pub trait AsyncProtocolFormatFragment<'r, R: 'r + ?Sized>: ProtocolFormatFragment {
@@ -577,6 +586,38 @@ where
     }
 }
 
+pub struct AssertEq<PF: ProtocolFormatFragment>(PF, PF::Output);
+impl<PF> ProtocolFormatFragment for AssertEq<PF>
+where
+    PF: ProtocolFormatFragment,
+    PF::Output: std::fmt::Debug + Eq,
+{
+    type Output = PF::Output;
+
+    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+        let v = self.0.read_sync(reader)?;
+        assert_eq!(v, self.1);
+        Ok(v)
+    }
+}
+impl<'r, R, PF> AsyncProtocolFormatFragment<'r, R> for AssertEq<PF>
+where
+    PF: AsyncProtocolFormatFragment<'r, R> + 'r,
+    R: AsyncRead + Unpin + ?Sized + 'r,
+    PF::Output: std::fmt::Debug + Eq + 'r,
+{
+    type ReaderF = LocalBoxFuture<'r, std::io::Result<PF::Output>>;
+
+    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+        async move {
+            let v = self.0.read_format(reader).await?;
+            assert_eq!(v, self.1);
+            Ok(v)
+        }
+        .boxed_local()
+    }
+}
+
 macro_rules! ProtocolFormatFragmentGroup {
     ($($a: ident: $n: tt),+) => {
         impl<$($a),+> ProtocolFormatFragment for ($($a),+) where $($a: ProtocolFormatFragment),+ {
@@ -660,7 +701,7 @@ macro_rules! DefFormatStruct {
             $($val: $vty),*
         }
 
-        DefProtocolFormat!($pf_name for $struct_name { $($val <- $fmt),* });
+        $crate::DefProtocolFormat!($pf_name for $struct_name { $($val <- $fmt),* });
     }
 }
 #[macro_export]
@@ -672,7 +713,7 @@ macro_rules! DefProtocolFormat {
 
             #[inline]
             fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
-                ReadSync!(reader => { $($val <- $fmt),* });
+                $crate::ReadSync!(reader => { $($val <- $fmt),* });
 
                 Ok($struct_name { $($val),* })
             }
@@ -685,7 +726,7 @@ macro_rules! DefProtocolFormat {
                 use futures_util::future::FutureExt;
 
                 async move {
-                    ReadAsync!(reader => { $($val <- $fmt),* });
+                    $crate::ReadAsync!(reader => { $($val <- $fmt),* });
 
                     Ok($struct_name { $($val),* })
                 }.boxed_local()

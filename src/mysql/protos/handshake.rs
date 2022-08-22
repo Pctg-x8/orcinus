@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
 use crate::{protos::format, ReadCounted};
-use crate::{DefFormatStruct, DefProtocolFormat, ReadAsync, ReadCountedSync, ReadSync};
+use crate::{DefFormatStruct, ReadCountedSync, ReadSync};
 
 use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
