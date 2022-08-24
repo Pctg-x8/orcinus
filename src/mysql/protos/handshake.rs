@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use futures_util::future::LocalBoxFuture;
+use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, TryFutureExt};
 use tokio::io::AsyncRead;
 
@@ -47,16 +47,15 @@ impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
             .map(From::from)
     }
 }
-impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV10ShortFormat
-where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'r, R>
+    for HandshakeV10ShortFormat
 {
     type ReaderF = futures_util::future::MapOk<
         <RawHandshakeV10ShortProtocolFormat as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
         fn(RawHandshakeV10Short) -> HandshakeV10Short,
     >;
 
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         RawHandshakeV10ShortProtocolFormat
             .read_format(reader)
             .map_ok(From::from)
@@ -81,10 +80,10 @@ DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
 impl HandshakeV10Long {
     pub async fn read_additional(
         short: HandshakeV10Short,
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         let head = RawHandshakeV10ExtHeadProtocolFormat
-            .read_format(reader)
+            .read_format(&mut reader)
             .await?;
         let capability_flags = short
             .capability_flags
@@ -92,7 +91,7 @@ impl HandshakeV10Long {
 
         let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
             format::Bytes(13.max(head.auth_plugin_data_length - 8) as _)
-                .read_format(reader)
+                .read_format(&mut reader)
                 .await
                 .map(Some)?
         } else {
@@ -100,7 +99,7 @@ impl HandshakeV10Long {
         };
         let auth_plugin_name = if capability_flags.support_plugin_auth() {
             format::NullTerminatedString
-                .read_format(reader)
+                .read_format(&mut reader)
                 .await
                 .map(Some)?
         } else {
@@ -183,16 +182,16 @@ impl format::ProtocolFormatFragment for HandshakeV9Format {
         RawHandshakeV9Format.read_sync(reader).map(From::from)
     }
 }
-impl<'r, R> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV9Format
+impl<'r, R: 'r> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV9Format
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Send + Unpin,
 {
     type ReaderF = futures_util::future::MapOk<
         <RawHandshakeV9Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
         fn(RawHandshakeV9) -> HandshakeV9,
     >;
 
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         RawHandshakeV9Format.read_format(reader).map_ok(From::from)
     }
 }
@@ -205,7 +204,7 @@ pub enum Handshake {
 }
 impl Handshake {
     pub async fn read_packet(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Unpin + Sync + Send + ?Sized),
     ) -> std::io::Result<(Self, u8)> {
         ReadAsync!(reader => {
             packet_header <- format::PacketHeader,
@@ -414,9 +413,9 @@ impl AuthMoreData {
     }
 
     pub async fn expacted_read_packet(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
         let heading = format::U8.read_format(&mut reader).await?;
         assert_eq!(heading, 0x01, "invalid AuthMoreData packet");
@@ -435,7 +434,7 @@ impl AuthMoreData {
 
     pub async fn read(
         payload_length: usize,
-        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Sync + Send + Unpin>,
     ) -> std::io::Result<Self> {
         Self::format(payload_length - reader.read_bytes())
             .read_format(reader)
@@ -491,13 +490,13 @@ impl ReceivePacket for AuthMoreDataResponse {
 }
 impl<'r, R> AsyncReceivePacket<'r, R> for AuthMoreDataResponse
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + Send + Sync + 'r,
 {
-    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
 
-    fn read_packet_async(reader: &'r mut R, client_capability: CapabilityFlags) -> Self::ReceiveF {
+    fn read_packet_async(mut reader: R, client_capability: CapabilityFlags) -> Self::ReceiveF {
         async move {
-            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
             let mut reader = ReadCounted::new(reader);
             let heading = format::U8.read_format(&mut reader).await?;
 
@@ -517,7 +516,7 @@ where
                 }
             }
         }
-        .boxed_local()
+        .boxed()
     }
 }
 

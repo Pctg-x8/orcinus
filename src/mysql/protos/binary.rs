@@ -309,13 +309,13 @@ impl BinaryResultsetRow {
     pub async fn read(
         payload_length: usize,
         column_count: usize,
-        reader: &mut ReadCounted<impl AsyncRead + Unpin>,
+        mut reader: &mut ReadCounted<impl AsyncRead + Sync + Send + Unpin>,
     ) -> std::io::Result<Self> {
         let null_bitmap = format::Bytes((column_count + 7 + 2) / 8)
-            .read_format(reader)
+            .read_format(&mut reader)
             .await?;
         let values = format::Bytes(payload_length - reader.read_bytes())
-            .read_format(reader)
+            .read_format(&mut reader)
             .await?;
 
         Ok(Self {
@@ -396,11 +396,11 @@ impl BinaryResultset41 {
         format::Mapped(EOFPacket41Format, Self::EOF);
 
     pub async fn read_packet(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
         let r1 = format::U8.read_format(&mut reader).await?;
 

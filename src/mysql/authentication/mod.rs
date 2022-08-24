@@ -5,8 +5,6 @@ mod sha256;
 use std::io::Read;
 use std::io::Write;
 
-use tokio::io::{AsyncRead, AsyncWrite};
-
 use crate::protos::CapabilityFlags;
 use crate::protos::ClientPacket;
 use crate::protos::HandshakeResponse320;
@@ -32,7 +30,7 @@ impl ConnectionInfo<'_> {
         &'s self,
         auth_response: &'s [u8],
         auth_plugin_name: Option<&'s str>,
-    ) -> Box<dyn ClientPacket + 's> {
+    ) -> Box<dyn ClientPacket + Sync + Send + 's> {
         if self.client_capabilities.support_41_protocol() {
             Box::new(HandshakeResponse41 {
                 capability: self.client_capabilities,
@@ -56,16 +54,8 @@ impl ConnectionInfo<'_> {
     }
 }
 
-pub trait Authentication<'s> {
+pub trait Authentication {
     const NAME: &'static str;
-    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>> + 's;
-
-    fn run(
-        &'s self,
-        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
-        con_info: &'s ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF;
 
     fn run_sync(
         &self,
@@ -73,4 +63,16 @@ pub trait Authentication<'s> {
         con_info: &ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError>;
+}
+pub trait AsyncAuthentication<'s, S: 's + Send>: Authentication {
+    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>>
+        + Send
+        + 's;
+
+    fn run(
+        &'s self,
+        stream: S,
+        con_info: &'s ConnectionInfo,
+        first_sequence_id: u8,
+    ) -> Self::OperationF;
 }

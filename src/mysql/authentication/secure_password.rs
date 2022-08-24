@@ -1,9 +1,12 @@
-use futures_util::{future::LocalBoxFuture, FutureExt};
+use futures_util::{future::BoxFuture, FutureExt};
 use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY as SHA1};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    protos::{write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket, ReceivePacket},
+    protos::{
+        write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket,
+        ReceivePacket,
+    },
     CommunicationError,
 };
 
@@ -26,39 +29,8 @@ pub struct Native41<'s> {
     pub server_data_1: &'s [u8],
     pub server_data_2: &'s [u8],
 }
-impl<'s> super::Authentication<'s> for Native41<'_> {
+impl super::Authentication for Native41<'_> {
     const NAME: &'static str = "mysql_native_password";
-    type OperationF = LocalBoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
-
-    fn run(
-        &'s self,
-        stream: &'s mut (impl AsyncRead + AsyncWrite + Unpin + ?Sized),
-        con_info: &'s super::ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF {
-        async move {
-            let payload = gen_secure_password_auth_response(
-                con_info.password,
-                self.server_data_1,
-                self.server_data_2,
-            );
-
-            write_packet(
-                stream,
-                &con_info.make_handshake_response(&payload, Some(Self::NAME)),
-                first_sequence_id,
-            )
-            .await?;
-            stream.flush().await?;
-            let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
-                    .await?
-                    .into_result()?;
-
-            Ok((resp, sequence_id))
-        }
-        .boxed_local()
-    }
 
     fn run_sync(
         &self,
@@ -79,9 +51,45 @@ impl<'s> super::Authentication<'s> for Native41<'_> {
         )?;
         stream.flush()?;
         let (resp, sequence_id) =
-            GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
-                .into_result()?;
+            GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?.into_result()?;
 
         Ok((resp, sequence_id))
+    }
+}
+impl<'s, S> super::AsyncAuthentication<'s, S> for Native41<'_>
+where
+    S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 's,
+{
+    type OperationF = BoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
+
+    fn run(
+        &'s self,
+        mut stream: S,
+        con_info: &'s super::ConnectionInfo,
+        first_sequence_id: u8,
+    ) -> Self::OperationF {
+        async move {
+            let payload = gen_secure_password_auth_response(
+                con_info.password,
+                self.server_data_1,
+                self.server_data_2,
+            );
+
+            write_packet(
+                &mut stream,
+                &con_info
+                    .make_handshake_response(&payload, Some(<Self as super::Authentication>::NAME)),
+                first_sequence_id,
+            )
+            .await?;
+            stream.flush().await?;
+            let (resp, sequence_id) =
+                GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
+                    .await?
+                    .into_result()?;
+
+            Ok((resp, sequence_id))
+        }
+        .boxed()
     }
 }

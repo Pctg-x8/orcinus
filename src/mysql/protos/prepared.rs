@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use futures_util::{future::LocalBoxFuture, FutureExt};
+use futures_util::{future::BoxFuture, FutureExt};
 use tokio::io::AsyncRead;
 
 use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
@@ -134,7 +134,7 @@ impl From<RawStmtPrepareOk> for StmtPrepareOk {
     }
 }
 impl StmtPrepareOk {
-    pub async fn read(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
+    pub async fn read(reader: impl AsyncRead + Send + Unpin) -> std::io::Result<Self> {
         RawStmtPrepareOkFormat
             .read_format(reader)
             .await
@@ -187,16 +187,13 @@ impl super::ReceivePacket for StmtPrepareResult {
 }
 impl<'r, R> super::AsyncReceivePacket<'r, R> for StmtPrepareResult
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + Send + Sync + 'r,
 {
-    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
 
-    fn read_packet_async(
-        reader: &'r mut R,
-        client_capabilities: CapabilityFlags,
-    ) -> Self::ReceiveF {
+    fn read_packet_async(mut reader: R, client_capabilities: CapabilityFlags) -> Self::ReceiveF {
         async move {
-            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
             let mut reader = ReadCounted::new(reader);
             let first_byte = format::U8.read_format(&mut reader).await?;
 
@@ -214,7 +211,7 @@ where
                 _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
             }
         }
-        .boxed_local()
+        .boxed()
     }
 }
 
@@ -264,16 +261,13 @@ impl super::ReceivePacket for StmtExecuteResult {
 }
 impl<'r, R> super::AsyncReceivePacket<'r, R> for StmtExecuteResult
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + Send + Sync + 'r,
 {
-    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
 
-    fn read_packet_async(
-        reader: &'r mut R,
-        client_capabilities: CapabilityFlags,
-    ) -> Self::ReceiveF {
+    fn read_packet_async(mut reader: R, client_capabilities: CapabilityFlags) -> Self::ReceiveF {
         async move {
-            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
             let mut reader = ReadCounted::new(reader);
             let head_byte = format::U8.read_format(&mut reader).await?;
 
@@ -299,6 +293,6 @@ where
                 }
             }
         }
-        .boxed_local()
+        .boxed()
     }
 }

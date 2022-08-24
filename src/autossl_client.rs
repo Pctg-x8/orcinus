@@ -9,11 +9,11 @@ use parking_lot::{Mutex, MutexGuard};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    authentication::{self, Authentication},
+    authentication::{self, AsyncAuthentication, Authentication},
     protos::{
         drop_packet, drop_packet_sync, request, request_async, write_packet, write_packet_sync,
-        CapabilityFlags, ErrPacket, Handshake, QueryCommand, QueryCommandResponse, QuitCommand,
-        SSLRequest, StmtPrepareCommand,
+        AsyncReceivePacket, CapabilityFlags, ErrPacket, Handshake, QueryCommand,
+        QueryCommandResponse, QuitCommand, SSLRequest, StmtPrepareCommand,
     },
     BinaryResultsetIterator, BinaryResultsetStream, BlockingStatement, CommunicationError,
     GenericClient, Statement, TextResultsetIterator, TextResultsetStream,
@@ -253,7 +253,7 @@ impl Drop for BlockingClient {
 }
 
 pub(crate) type AsyncDynamicStream =
-    tokio::io::BufStream<Box<dyn AsyncBidirectionalStream + Unpin>>;
+    tokio::io::BufStream<Box<dyn AsyncBidirectionalStream + Send + Sync + Unpin + 'static>>;
 pub struct Client {
     stream: AsyncDynamicStream,
     capability: CapabilityFlags,
@@ -265,9 +265,7 @@ impl Client {
         connect_info: &SSLConnectInfo<'_>,
     ) -> Result<Self, CommunicationError> {
         let stream = tokio::net::TcpStream::connect(addr).await?;
-        let mut stream = tokio::io::BufStream::new(
-            Box::new(stream) as Box<dyn AsyncBidirectionalStream + Unpin>
-        );
+        let mut stream = tokio::io::BufStream::new(Box::new(stream) as Box<_>);
         let (server_handshake, mut sequence_id) = Handshake::read_packet(&mut stream).await?;
 
         let server_caps = match server_handshake {
@@ -308,9 +306,7 @@ impl Client {
             let tls_stream = tokio_rustls::TlsConnector::from(connect_info.ssl_config.clone())
                 .connect(server_name, stream.into_inner())
                 .await?;
-            stream = tokio::io::BufStream::new(
-                Box::new(tls_stream) as Box<dyn AsyncBidirectionalStream + Unpin>
-            );
+            stream = tokio::io::BufStream::new(Box::new(tls_stream) as Box<_>);
         } else {
             capability = required_caps & server_caps;
         }
@@ -380,7 +376,9 @@ impl Client {
     }
 
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        request_async(&QueryCommand(query), &mut self.stream, 0, self.capability).await
+        write_packet(&mut self.stream, &QueryCommand(query), 0).await?;
+        self.stream.flush().await?;
+        QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
     }
 
     pub async fn fetch_all<'s>(
@@ -412,11 +410,6 @@ impl Client {
         column_count: usize,
     ) -> std::io::Result<BinaryResultsetStream<'s, AsyncDynamicStream>> {
         BinaryResultsetStream::new(&mut self.stream, self.capability, column_count).await
-    }
-}
-impl Drop for Client {
-    fn drop(&mut self) {
-        eprintln!("warning: client has dropped without explicit quit command");
     }
 }
 
@@ -473,7 +466,7 @@ impl SharedClient {
         let mut c = self.lock();
         let cap = c.capability;
 
-        let resp = request_async(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
+        let resp = request_async(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
 

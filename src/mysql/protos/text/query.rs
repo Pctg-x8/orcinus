@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use futures_util::{future::LocalBoxFuture, FutureExt};
+use futures_util::{future::BoxFuture, FutureExt};
 use tokio::io::AsyncRead;
 
 use crate::{
@@ -88,13 +88,13 @@ impl ReceivePacket for QueryCommandResponse {
 }
 impl<'r, R> AsyncReceivePacket<'r, R> for QueryCommandResponse
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + Send + Sync + 'r,
 {
-    type ReceiveF = LocalBoxFuture<'r, std::io::Result<Self>>;
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
 
-    fn read_packet_async(reader: &'r mut R, client_capability: CapabilityFlags) -> Self::ReceiveF {
+    fn read_packet_async(mut reader: R, client_capability: CapabilityFlags) -> Self::ReceiveF {
         async move {
-            let packet_header = format::PacketHeader.read_format(reader).await?;
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
             let mut reader = ReadCounted::new(reader);
             let head_value = format::U8.read_format(&mut reader).await?;
 
@@ -127,7 +127,7 @@ where
                 }
             }
         }
-        .boxed_local()
+        .boxed()
     }
 }
 
@@ -194,7 +194,7 @@ impl From<RawColumnDefinition41ForFieldList> for ColumnDefinition41 {
 }
 impl ColumnDefinition41 {
     pub async fn read_packet_for_field_list(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
         RawColumnDefinition41ForFieldListFormat
             .read_format(reader)
@@ -232,14 +232,14 @@ impl ReceivePacket for ColumnDefinition41 {
 }
 impl<'r, R> AsyncReceivePacket<'r, R> for ColumnDefinition41
 where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+    R: AsyncRead + Unpin + Send + 'r,
 {
     type ReceiveF = <format::Mapped<
         RawColumnDefinition41Format,
         fn(RawColumnDefinition41) -> ColumnDefinition41,
-    > as AsyncProtocolFormatFragment<'r, R>>::ReaderF;
+    > as AsyncProtocolFormatFragment<'r, &'r mut R>>::ReaderF;
 
-    fn read_packet_async(reader: &'r mut R, _client_capability: CapabilityFlags) -> Self::ReceiveF {
+    fn read_packet_async(reader: R, _client_capability: CapabilityFlags) -> Self::ReceiveF {
         RawColumnDefinition41Format
             .map(Self::from as _)
             .read_format(reader)
@@ -310,10 +310,10 @@ impl Resultset41 {
         format::Mapped(EOFPacket41Format, Self::EOF);
 
     pub async fn read_packet(
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Unpin + Sync + Send + ?Sized),
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_format(reader).await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
         let head_byte = format::U8.read_format(&mut reader).await?;
 

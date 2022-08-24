@@ -2,7 +2,7 @@
 
 use std::{io::Read, pin::Pin};
 
-use futures_util::{future::LocalBoxFuture, pin_mut, FutureExt, TryFutureExt};
+use futures_util::{future::BoxFuture, pin_mut, FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub trait ProtocolFormatFragment {
@@ -10,6 +10,7 @@ pub trait ProtocolFormatFragment {
 
     fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output>;
 
+    /// (<$>) operator
     #[inline]
     fn map<F, R>(self, mapper: F) -> Mapped<Self, F>
     where
@@ -29,10 +30,10 @@ pub trait ProtocolFormatFragment {
     }
 }
 
-pub trait AsyncProtocolFormatFragment<'r, R: 'r + ?Sized>: ProtocolFormatFragment {
-    type ReaderF: 'r + std::future::Future<Output = std::io::Result<Self::Output>>;
+pub trait AsyncProtocolFormatFragment<'r, R: 'r + Send>: ProtocolFormatFragment {
+    type ReaderF: std::future::Future<Output = std::io::Result<Self::Output>> + Send + 'r;
 
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF;
+    fn read_format(self, reader: R) -> Self::ReaderF;
 }
 
 // TODO: ほんとうはassociated constでもちたい
@@ -376,11 +377,11 @@ impl ProtocolFormatFragment for U8 {
         Ok(b[0])
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U8 {
-    type ReaderF = ReadF<1, &'r mut R, u8>;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for U8 {
+    type ReaderF = ReadF<1, R, u8>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadF::new(reader)
     }
 }
@@ -396,11 +397,11 @@ impl ProtocolFormatFragment for U16 {
         Ok(u16::from_le_bytes(b))
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U16 {
-    type ReaderF = ReadF<2, &'r mut R, u16>;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for U16 {
+    type ReaderF = ReadF<2, R, u16>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadF::new(reader)
     }
 }
@@ -416,11 +417,11 @@ impl ProtocolFormatFragment for U32 {
         Ok(u32::from_le_bytes(b))
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for U32 {
-    type ReaderF = ReadF<4, &'r mut R, u32>;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for U32 {
+    type ReaderF = ReadF<4, R, u32>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadF::new(reader)
     }
 }
@@ -434,13 +435,13 @@ impl ProtocolFormatFragment for LengthEncodedInteger {
         super::LengthEncodedInteger::read_sync(reader).map(|x| x.0)
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     for LengthEncodedInteger
 {
-    type ReaderF = ReadLengthEncodedIntegerF<&'r mut R>;
+    type ReaderF = ReadLengthEncodedIntegerF<R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadLengthEncodedIntegerF::new(reader)
     }
 }
@@ -454,13 +455,13 @@ impl ProtocolFormatFragment for LengthEncodedIntegerAhead {
         super::LengthEncodedInteger::read_ahead_sync(self.0, reader).map(|x| x.0)
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     for LengthEncodedIntegerAhead
 {
-    type ReaderF = ReadLengthEncodedIntegerF<&'r mut R>;
+    type ReaderF = ReadLengthEncodedIntegerF<R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadLengthEncodedIntegerF::new_ahead(self.0, reader)
     }
 }
@@ -476,13 +477,13 @@ impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
         Ok(b)
     }
 }
-impl<'r, const L: usize, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+impl<'r, const L: usize, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     for FixedBytes<L>
 {
-    type ReaderF = ReadFixedBytesF<L, &'r mut R>;
+    type ReaderF = ReadFixedBytesF<L, R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadFixedBytesF::new(reader)
     }
 }
@@ -501,11 +502,11 @@ impl ProtocolFormatFragment for Bytes {
         Ok(b)
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for Bytes {
-    type ReaderF = ReadBytes<&'r mut R>;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for Bytes {
+    type ReaderF = ReadBytes<R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadBytes::new(reader, self.0)
     }
 }
@@ -525,14 +526,11 @@ impl ProtocolFormatFragment for BytesAhead {
         Ok(b)
     }
 }
-impl<'r, R> AsyncProtocolFormatFragment<'r, R> for BytesAhead
-where
-    R: AsyncRead + Unpin + ?Sized + 'r,
-{
-    type ReaderF = ReadBytes<&'r mut R>;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for BytesAhead {
+    type ReaderF = ReadBytes<R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadBytes::new_ahead(reader, self.0, self.1)
     }
 }
@@ -556,13 +554,13 @@ impl ProtocolFormatFragment for NullTerminatedString {
         }
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     for NullTerminatedString
 {
-    type ReaderF = ReadNullTerminatedString<&'r mut R>;
+    type ReaderF = ReadNullTerminatedString<R>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadNullTerminatedString::new(reader)
     }
 }
@@ -581,13 +579,13 @@ impl ProtocolFormatFragment for FixedLengthString {
         Ok(unsafe { String::from_utf8_unchecked(b) })
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R>
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     for FixedLengthString
 {
-    type ReaderF = futures_util::future::MapOk<ReadBytes<&'r mut R>, fn(Vec<u8>) -> String>;
+    type ReaderF = futures_util::future::MapOk<ReadBytes<R>, fn(Vec<u8>) -> String>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadBytes::new(reader, self.0).map_ok(unsafe_recover_string_from_u8s)
     }
 }
@@ -605,20 +603,19 @@ impl ProtocolFormatFragment for LengthEncodedString {
         FixedLengthString(len as _).read_sync(reader)
     }
 }
-impl<'r, R> AsyncProtocolFormatFragment<'r, R> for LengthEncodedString
-where
-    R: AsyncRead + Unpin + ?Sized + 'r,
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
+    for LengthEncodedString
 {
     // TODO: できればBoxつかいたくない
-    type ReaderF = LocalBoxFuture<'r, std::io::Result<String>>;
+    type ReaderF = BoxFuture<'r, std::io::Result<String>>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, mut reader: R) -> Self::ReaderF {
         async move {
-            let len = LengthEncodedInteger.read_format(reader).await?;
-            FixedLengthString(len as _).read_format(reader).await
+            let len = LengthEncodedInteger.read_format(&mut reader).await?;
+            FixedLengthString(len as _).read_format(&mut reader).await
         }
-        .boxed_local()
+        .boxed()
     }
 }
 
@@ -634,14 +631,12 @@ impl ProtocolFormatFragment for PacketHeader {
         Ok(super::PacketHeader::from_fixed_bytes(ph))
     }
 }
-impl<'r, R: AsyncRead + Unpin + ?Sized + 'r> AsyncProtocolFormatFragment<'r, R> for PacketHeader {
-    type ReaderF = futures_util::future::MapOk<
-        ReadFixedBytesF<4, &'r mut R>,
-        fn([u8; 4]) -> super::PacketHeader,
-    >;
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for PacketHeader {
+    type ReaderF =
+        futures_util::future::MapOk<ReadFixedBytesF<4, R>, fn([u8; 4]) -> super::PacketHeader>;
 
     #[inline]
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         ReadFixedBytesF::new(reader).map_ok(super::PacketHeader::from_fixed_bytes)
     }
 }
@@ -658,16 +653,16 @@ where
         self.0.read_sync(reader).map(self.1)
     }
 }
-impl<'r, R, PF, F, Ret> AsyncProtocolFormatFragment<'r, R> for Mapped<PF, F>
+impl<'r, R: 'r, PF, F, Ret: 'static> AsyncProtocolFormatFragment<'r, R> for Mapped<PF, F>
 where
     PF: AsyncProtocolFormatFragment<'r, R>,
-    F: FnOnce(<PF as ProtocolFormatFragment>::Output) -> Ret,
-    R: AsyncRead + Unpin + ?Sized + 'r,
-    F: 'r,
+    PF::Output: 'static,
+    F: FnOnce(<PF as ProtocolFormatFragment>::Output) -> Ret + Send + 'r,
+    R: AsyncRead + Send,
 {
     type ReaderF = futures_util::future::MapOk<PF::ReaderF, F>;
 
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         self.0.read_format(reader).map_ok(self.1)
     }
 }
@@ -686,21 +681,21 @@ where
         Ok(v)
     }
 }
-impl<'r, R, PF> AsyncProtocolFormatFragment<'r, R> for AssertEq<PF>
+impl<'r, R: 'r, PF> AsyncProtocolFormatFragment<'r, R> for AssertEq<PF>
 where
-    PF: AsyncProtocolFormatFragment<'r, R> + 'r,
-    R: AsyncRead + Unpin + ?Sized + 'r,
-    PF::Output: std::fmt::Debug + Eq + 'r,
+    PF: AsyncProtocolFormatFragment<'r, R> + Send + 'r,
+    R: AsyncRead + Send + Unpin,
+    PF::Output: std::fmt::Debug + Eq + Send + 'r,
 {
-    type ReaderF = LocalBoxFuture<'r, std::io::Result<PF::Output>>;
+    type ReaderF = BoxFuture<'r, std::io::Result<PF::Output>>;
 
-    fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+    fn read_format(self, reader: R) -> Self::ReaderF {
         async move {
             let v = self.0.read_format(reader).await?;
             assert_eq!(v, self.1);
             Ok(v)
         }
-        .boxed_local()
+        .boxed()
     }
 }
 
@@ -717,24 +712,25 @@ macro_rules! ProtocolFormatFragmentGroup {
                 Ok(($($a),+))
             }
         }
-        impl<'r, Reader, $($a),+> AsyncProtocolFormatFragment<'r, Reader> for ($($a),+)
+        /*impl<'r, Reader, $($a),+> AsyncProtocolFormatFragment<'r, Reader> for ($($a),+)
         where
-            Reader: AsyncRead + Unpin + ?Sized + 'r,
+            Reader: AsyncRead + Send + Unpin + ?Sized + 'r,
             $($a: AsyncProtocolFormatFragment<'r, Reader>,)+
-            $($a: 'static,)+
+            $($a::Output: Send + 'static,)+
+            $($a: Send + 'static,)+
         {
-            type ReaderF = LocalBoxFuture<'r, std::io::Result<($($a::Output),+)>>;
+            type ReaderF = BoxFuture<'r, std::io::Result<($($a::Output),+)>>;
 
             #[inline]
             fn read_format(self, reader: &'r mut Reader) -> Self::ReaderF {
                 async move {
                     #![allow(non_snake_case)]
-                    $(let $a = self.$n.read_format(unsafe { std::ptr::read(&reader) }).await?;)+
+                    $crate::ReadAsync!(reader => { $($a <- self.$n),* });
 
                     Ok(($($a),+))
-                }.boxed_local()
+                }.boxed()
             }
-        }
+        }*/
     }
 }
 
@@ -777,7 +773,7 @@ macro_rules! ReadSync {
 macro_rules! ReadAsync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
         $(
-            let $val = $fmt.read_format($reader).await?;
+            let $val = $fmt.read_format(&mut $reader).await?;
         )*
     }
 }
@@ -813,21 +809,21 @@ macro_rules! DefProtocolFormat {
                 Ok($struct_name { $($val),* })
             }
         }
-        impl<'r, R> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
+        impl<'r, R: 'r> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
         where
-            R: tokio::io::AsyncRead + Unpin + ?Sized + 'r
+            R: tokio::io::AsyncRead + Send + Unpin
         {
-            type ReaderF = futures_util::future::LocalBoxFuture<'r, std::io::Result<$struct_name>>;
+            type ReaderF = futures_util::future::BoxFuture<'r, std::io::Result<$struct_name>>;
 
             #[inline]
-            fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+            fn read_format(self, mut reader: R) -> Self::ReaderF {
                 use futures_util::future::FutureExt;
 
                 async move {
                     $crate::ReadAsync!(reader => { $($val <- $fmt),* });
 
                     Ok($struct_name { $($val),* })
-                }.boxed_local()
+                }.boxed()
             }
         }
     };
@@ -843,21 +839,21 @@ macro_rules! DefProtocolFormat {
                 Ok($struct_name { $($val),* })
             }
         }
-        impl<'r, R> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
+        impl<'r, R: 'r> $crate::mysql::protos::format::AsyncProtocolFormatFragment<'r, R> for $pf_name
         where
-            R: tokio::io::AsyncRead + Unpin + ?Sized + 'r
+            R: tokio::io::AsyncRead + Send + Unpin
         {
-            type ReaderF = futures_util::future::LocalBoxFuture<'r, std::io::Result<$struct_name>>;
+            type ReaderF = futures_util::future::BoxFuture<'r, std::io::Result<$struct_name>>;
 
             #[inline]
-            fn read_format(self, reader: &'r mut R) -> Self::ReaderF {
+            fn read_format(self, mut reader: R) -> Self::ReaderF {
                 use futures_util::future::FutureExt;
 
                 async move {
                     $crate::ReadAsync!(reader => { $($val <- $fmt),* });
 
                     Ok($struct_name { $($val),* })
-                }.boxed_local()
+                }.boxed()
             }
         }
     }

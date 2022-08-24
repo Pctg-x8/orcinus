@@ -3,7 +3,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::{future::LocalBoxFuture, FutureExt, TryStreamExt};
+use futures_util::{
+    future::{BoxFuture, LocalBoxFuture},
+    FutureExt, TryStreamExt,
+};
 use tokio::io::AsyncRead;
 
 use crate::{
@@ -118,7 +121,7 @@ where
 
 pub enum TextResultsetStreamState<'a> {
     Initialized,
-    PendingReadOp(LocalBoxFuture<'a, std::io::Result<Resultset41>>),
+    PendingReadOp(BoxFuture<'a, std::io::Result<Resultset41>>),
     Finish { more_resultset: bool },
 }
 pub struct TextResultsetStream<'s, R: ?Sized> {
@@ -129,23 +132,23 @@ pub struct TextResultsetStream<'s, R: ?Sized> {
 }
 impl<'s, R> TextResultsetStream<'s, R>
 where
-    R: AsyncRead + Unpin + ?Sized,
+    R: AsyncRead + Send + Sync + Unpin + ?Sized,
 {
     pub async fn new(
-        stream: &'s mut R,
+        mut stream: &'s mut R,
         column_count: usize,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<TextResultsetStream<'s, R>> {
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
             columns.push(
-                ColumnDefinition41::read_packet_async(stream, client_capability)
+                ColumnDefinition41::read_packet_async(&mut stream, client_capability)
                     .await
                     .expect("Failed to read column def"),
             );
         }
         if !client_capability.support_deprecate_eof() {
-            EOFPacket41::expected_read_packet(stream)
+            EOFPacket41::expected_read_packet(&mut stream)
                 .await
                 .expect("Failed to read eof packet of columns");
         }
@@ -174,7 +177,7 @@ impl<R: ?Sized> TextResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for TextResultsetStream<'s, R>
 where
-    R: AsyncRead + Unpin + ?Sized,
+    R: AsyncRead + Unpin + Send + Sync + ?Sized,
 {
     type Item = Result<ResultsetRow, CommunicationError>;
 
@@ -221,7 +224,7 @@ where
                         unsafe { &mut *(this.stream as *mut _) as &'s mut _ },
                         this.client_capability,
                     )
-                    .boxed_local();
+                    .boxed();
 
                     match f.poll_unpin(cx) {
                         std::task::Poll::Pending => {
@@ -384,7 +387,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
     pub fn poll_next(
         self,
         cx: &mut Context<'_>,
-        stream: &'a mut (impl AsyncRead + Unpin + ?Sized),
+        stream: &'a mut (impl AsyncRead + Send + Sync + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> (
@@ -463,16 +466,17 @@ pub struct BinaryResultsetStream<'s, R: ?Sized> {
 }
 impl<'s, R> BinaryResultsetStream<'s, R>
 where
-    R: AsyncRead + Unpin + ?Sized,
+    R: AsyncRead + Send + Sync + Unpin + ?Sized,
 {
     pub async fn new(
-        stream: &'s mut R,
+        mut stream: &'s mut R,
         client_capability: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<BinaryResultsetStream<'s, R>> {
         let mut columns = Vec::with_capacity(column_count as _);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet_async(stream, client_capability).await?);
+            columns
+                .push(ColumnDefinition41::read_packet_async(&mut stream, client_capability).await?);
         }
 
         Ok(Self {
@@ -503,7 +507,7 @@ impl<R: ?Sized> BinaryResultsetStream<'_, R> {
 }
 impl<'s, R> futures_util::Stream for BinaryResultsetStream<'s, R>
 where
-    R: AsyncRead + Unpin + ?Sized,
+    R: AsyncRead + Send + Sync + Unpin + ?Sized,
 {
     type Item = Result<BinaryResultsetRow, CommunicationError>;
 

@@ -1,12 +1,14 @@
 mod mysql;
 use std::io::{Read, Write};
 
+use mysql::authentication::AsyncAuthentication;
 use mysql::protos::drop_packet;
 use mysql::protos::drop_packet_sync;
 use mysql::protos::request;
 use mysql::protos::request_async;
 use mysql::protos::write_packet;
 use mysql::protos::write_packet_sync;
+use mysql::protos::AsyncReceivePacket;
 use mysql::protos::CapabilityFlags;
 use mysql::protos::ErrPacket;
 use mysql::protos::QueryCommand;
@@ -57,8 +59,8 @@ impl std::fmt::Display for CommunicationError {
 }
 impl std::error::Error for CommunicationError {}
 
-pub struct SharedClient<Stream: AsyncWriteExt + Unpin>(Mutex<Client<Stream>>);
-impl<Stream: AsyncWriteExt + Unpin> SharedClient<Stream> {
+pub struct SharedClient<Stream: AsyncWriteExt + Send + Sync + Unpin>(Mutex<Client<Stream>>);
+impl<Stream: AsyncWriteExt + Send + Sync + Unpin> SharedClient<Stream> {
     pub fn unshare(self) -> Client<Stream> {
         self.0.into_inner()
     }
@@ -282,17 +284,17 @@ impl BlockingClient<std::net::TcpStream> {
     }
 }
 
-pub struct Client<Stream: AsyncWriteExt + Unpin> {
+pub struct Client<Stream: AsyncWriteExt + Send + Sync + Unpin> {
     stream: Stream,
     capability: CapabilityFlags,
 }
-impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
+impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
     pub async fn handshake(
         mut stream: Stream,
         connect_info: &ConnectInfo<'_>,
     ) -> Result<Self, CommunicationError>
     where
-        Stream: AsyncRead,
+        Stream: AsyncRead + Sync + Send + 'static,
     {
         let (server_handshake, sequence_id) = Handshake::read_packet(&mut stream).await?;
 
@@ -385,9 +387,11 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
 
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
     where
-        Stream: AsyncRead,
+        Stream: AsyncRead + Sync + Send,
     {
-        request_async(&QueryCommand(query), &mut self.stream, 0, self.capability).await
+        write_packet(&mut self.stream, &QueryCommand(query), 0).await?;
+        self.stream.flush().await?;
+        QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
     }
 
     pub async fn fetch_all<'s>(
@@ -395,7 +399,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         query: &'s str,
     ) -> Result<TextResultsetStream<'s, Stream>, CommunicationError>
     where
-        Stream: AsyncRead,
+        Stream: AsyncRead + Sync + Send,
     {
         match self.query(query).await? {
             QueryCommandResponse::Resultset { column_count } => self
@@ -430,7 +434,7 @@ impl<Stream: AsyncWriteExt + Unpin> Client<Stream> {
         BinaryResultsetStream::new(&mut self.stream, self.capability, column_count).await
     }
 }
-impl<Stream: AsyncWriteExt + Unpin> Drop for Client<Stream> {
+impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Drop for Client<Stream> {
     fn drop(&mut self) {
         eprintln!("warning: client has dropped without explicit quit command");
     }
@@ -443,7 +447,20 @@ pub trait GenericClient {
     fn stream_mut(&mut self) -> &mut Self::Stream;
     fn capability(&self) -> CapabilityFlags;
 }
-impl<S: AsyncWriteExt + Unpin> GenericClient for Client<S> {
+impl<C: GenericClient> GenericClient for MutexGuard<'_, C> {
+    type Stream = C::Stream;
+
+    fn stream(&self) -> &Self::Stream {
+        C::stream(self)
+    }
+    fn stream_mut(&mut self) -> &mut Self::Stream {
+        C::stream_mut(self)
+    }
+    fn capability(&self) -> CapabilityFlags {
+        C::capability(self)
+    }
+}
+impl<S: AsyncWriteExt + Send + Sync + Unpin> GenericClient for Client<S> {
     type Stream = S;
 
     fn stream(&self) -> &Self::Stream {
@@ -478,7 +495,7 @@ pub trait SharedMysqlClient<'s> {
 }
 impl<'s, S> SharedMysqlClient<'s> for SharedClient<S>
 where
-    S: AsyncWriteExt + Unpin + 's,
+    S: AsyncWriteExt + Unpin + Send + Sync + 's,
 {
     type Client = Client<S>;
     type GuardedClientRef = MutexGuard<'s, Client<S>>;
@@ -507,7 +524,7 @@ pub struct Statement<'c, C: SharedMysqlClient<'c>> {
     client: &'c C,
     statement_id: u32,
 }
-impl<Stream: AsyncWriteExt + AsyncRead + Unpin> SharedClient<Stream> {
+impl<Stream: AsyncWriteExt + AsyncRead + Send + Sync + Unpin> SharedClient<Stream> {
     pub async fn prepare<'c, 's: 'c>(
         &'c self,
         statement: &'s str,
@@ -515,7 +532,7 @@ impl<Stream: AsyncWriteExt + AsyncRead + Unpin> SharedClient<Stream> {
         let mut c = self.lock();
         let cap = c.capability;
 
-        let resp = request_async(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
+        let resp = request_async(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
 
@@ -544,7 +561,7 @@ impl<Stream: AsyncWriteExt + AsyncRead + Unpin> SharedClient<Stream> {
 }
 impl<'c, C: SharedMysqlClient<'c>> Statement<'c, C>
 where
-    <C::Client as GenericClient>::Stream: AsyncWriteExt + Unpin,
+    <C::Client as GenericClient>::Stream: AsyncWriteExt + Send + Sync + Unpin,
 {
     pub async fn close(self) -> std::io::Result<()> {
         write_packet(
@@ -564,7 +581,7 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        request_async(&StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)
+        request_async(StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)
             .await?
             .into_result()?;
         Ok(())
@@ -583,7 +600,7 @@ where
         let cap = c.capability();
 
         request_async(
-            &StmtExecuteCommand {
+            StmtExecuteCommand {
                 statement_id: self.statement_id,
                 flags: StmtExecuteFlags::new(),
                 parameters,
@@ -655,8 +672,7 @@ where
             self.client.lock_client().stream_mut(),
             &StmtCloseCommand(self.statement_id),
             0,
-        )?;
-        Ok(())
+        )
     }
 
     pub fn reset(&mut self) -> Result<(), CommunicationError>
@@ -706,6 +722,9 @@ where
 
 #[cfg(feature = "r2d2-integration")]
 pub mod r2d2;
+
+#[cfg(feature = "bb8-integration")]
+pub mod bb8;
 
 #[cfg(feature = "autossl")]
 pub mod autossl_client;
