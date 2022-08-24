@@ -58,10 +58,10 @@ impl QueryCommandResponse {
 }
 impl ReceivePacket for QueryCommandResponse {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_value = format::U8.read_sync(&mut reader)?;
 
@@ -222,7 +222,7 @@ impl ColumnDefinition41 {
 }
 impl ReceivePacket for ColumnDefinition41 {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        reader: impl Read,
         _client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
         RawColumnDefinition41Format
@@ -350,10 +350,10 @@ impl Resultset41 {
     }
 
     pub fn read_packet_sync(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_byte = format::U8.read_sync(&mut reader)?;
 

@@ -57,7 +57,7 @@ async fn main() {
     sequence_id += 1;
     orcinus::protos::write_packet(
         &mut stream,
-        &orcinus::protos::SSLRequest {
+        orcinus::protos::SSLRequest {
             capability: required_caps & server_caps,
             max_packet_size: 16777216,
             character_set: 0xff,

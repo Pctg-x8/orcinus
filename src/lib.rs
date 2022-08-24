@@ -211,14 +211,14 @@ impl<Stream: Write> BlockingClient<Stream> {
     }
 
     pub fn quit(&mut self) -> std::io::Result<()> {
-        write_packet_sync(&mut self.stream, &QuitCommand, 0)
+        write_packet_sync(&mut self.stream, QuitCommand, 0)
     }
 
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
     where
         Stream: Read,
     {
-        request(&QueryCommand(query), &mut self.stream, 0, self.capability)
+        request(QueryCommand(query), &mut self.stream, 0, self.capability)
     }
 
     pub fn fetch_all<'s>(
@@ -381,7 +381,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
     }
 
     pub async fn quit(&mut self) -> std::io::Result<()> {
-        write_packet(&mut self.stream, &QuitCommand, 0).await?;
+        write_packet(&mut self.stream, QuitCommand, 0).await?;
         Ok(())
     }
 
@@ -389,7 +389,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
     where
         Stream: AsyncRead + Sync + Send,
     {
-        write_packet(&mut self.stream, &QueryCommand(query), 0).await?;
+        write_packet(&mut self.stream, QueryCommand(query), 0).await?;
         self.stream.flush().await?;
         QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
     }
@@ -566,7 +566,7 @@ where
     pub async fn close(self) -> std::io::Result<()> {
         write_packet(
             self.client.lock_client().stream_mut(),
-            &StmtCloseCommand(self.statement_id),
+            StmtCloseCommand(self.statement_id),
             0,
         )
         .await?;
@@ -637,8 +637,7 @@ impl<Stream: Write + Read> SharedBlockingClient<Stream> {
         let mut c = self.lock();
         let cap = c.capability;
 
-        let resp =
-            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
+        let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
@@ -670,7 +669,7 @@ where
     pub fn close(&mut self) -> std::io::Result<()> {
         write_packet_sync(
             self.client.lock_client().stream_mut(),
-            &StmtCloseCommand(self.statement_id),
+            StmtCloseCommand(self.statement_id),
             0,
         )
     }
@@ -682,7 +681,7 @@ where
         let mut c = self.client.lock_client();
         let cap = c.capability();
 
-        request(&StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)?.into_result()?;
+        request(StmtResetCommand(self.statement_id), c.stream_mut(), 0, cap)?.into_result()?;
         Ok(())
     }
 
@@ -699,7 +698,7 @@ where
         let cap = c.capability();
 
         request(
-            &StmtExecuteCommand {
+            StmtExecuteCommand {
                 statement_id: self.statement_id,
                 flags: StmtExecuteFlags::new(),
                 parameters,

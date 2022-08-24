@@ -26,8 +26,8 @@ impl ByteString<'_> {
     }
 }
 impl<'s> ByteString<'s> {
-    pub fn slice_from(reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
-        let len = format::LengthEncodedInteger.read_sync(reader)?;
+    pub fn slice_from(mut reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
+        let len = format::LengthEncodedInteger.read_sync(&mut reader)?;
         let s = &reader.get_ref()[reader.position() as usize..(reader.position() + len) as usize];
         reader.set_position(reader.position() + len);
         Ok(Self(s))
@@ -327,9 +327,9 @@ impl BinaryResultsetRow {
     pub fn read_sync(
         payload_length: usize,
         column_count: usize,
-        reader: &mut ReadCountedSync<impl Read>,
+        mut reader: &mut ReadCountedSync<impl Read>,
     ) -> std::io::Result<Self> {
-        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8).read_sync(reader)?;
+        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8).read_sync(&mut reader)?;
         let values = format::Bytes(payload_length - reader.read_bytes()).read_sync(reader)?;
 
         Ok(Self {
@@ -434,11 +434,11 @@ impl BinaryResultset41 {
     }
 
     pub fn read_packet_sync(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_byte = format::U8.read_sync(&mut reader)?;
 

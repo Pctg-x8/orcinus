@@ -133,7 +133,7 @@ impl BlockingClient {
 
             write_packet_sync(
                 &mut stream,
-                &SSLRequest {
+                SSLRequest {
                     capability,
                     max_packet_size: connect_info.base.max_packet_size,
                     character_set: connect_info.base.character_set,
@@ -209,11 +209,11 @@ impl BlockingClient {
     }
 
     pub fn quit(&mut self) -> std::io::Result<()> {
-        write_packet_sync(&mut self.stream, &QuitCommand, 0)
+        write_packet_sync(&mut self.stream, QuitCommand, 0)
     }
 
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        request(&QueryCommand(query), &mut self.stream, 0, self.capability)
+        request(QueryCommand(query), &mut self.stream, 0, self.capability)
     }
 
     pub fn fetch_all<'s>(
@@ -293,7 +293,7 @@ impl Client {
 
             write_packet(
                 &mut stream,
-                &SSLRequest {
+                SSLRequest {
                     capability,
                     max_packet_size: connect_info.base.max_packet_size,
                     character_set: connect_info.base.character_set,
@@ -371,12 +371,12 @@ impl Client {
     }
 
     pub async fn quit(&mut self) -> std::io::Result<()> {
-        write_packet(&mut self.stream, &QuitCommand, 0).await?;
+        write_packet(&mut self.stream, QuitCommand, 0).await?;
         Ok(())
     }
 
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        write_packet(&mut self.stream, &QueryCommand(query), 0).await?;
+        write_packet(&mut self.stream, QueryCommand(query), 0).await?;
         self.stream.flush().await?;
         QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
     }
@@ -502,8 +502,7 @@ impl SharedBlockingClient {
         let mut c = self.lock();
         let cap = c.capability;
 
-        let resp =
-            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
+        let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {

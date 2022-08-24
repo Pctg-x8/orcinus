@@ -24,7 +24,7 @@ impl super::Authentication for SHA256<'_> {
 
     fn run_sync(
         &self,
-        _stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
+        _stream: impl std::io::Read + std::io::Write,
         _con_info: &super::ConnectionInfo,
         _first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
@@ -78,7 +78,7 @@ impl super::Authentication for CachedSHA256<'_> {
 
     fn run_sync(
         &self,
-        stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
+        mut stream: impl std::io::Read + std::io::Write,
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
@@ -86,8 +86,8 @@ impl super::Authentication for CachedSHA256<'_> {
             // empty password authentication
 
             write_packet_sync(
-                stream,
-                &con_info.make_handshake_response(&[], Some(Self::NAME)),
+                &mut stream,
+                con_info.make_handshake_response(&[], Some(Self::NAME)),
                 first_sequence_id,
             )?;
             stream.flush()?;
@@ -106,13 +106,13 @@ impl super::Authentication for CachedSHA256<'_> {
         );
 
         write_packet_sync(
-            stream,
-            &con_info.make_handshake_response(&auth_response, Some(Self::NAME)),
+            &mut stream,
+            con_info.make_handshake_response(&auth_response, Some(Self::NAME)),
             first_sequence_id,
         )?;
         stream.flush()?;
         let (AuthMoreData(resp), last_sequence_id) =
-            AuthMoreDataResponse::read_packet(stream, con_info.client_capabilities)?
+            AuthMoreDataResponse::read_packet(&mut stream, con_info.client_capabilities)?
                 .into_result()?;
 
         if resp == [0x03] {
@@ -128,8 +128,8 @@ impl super::Authentication for CachedSHA256<'_> {
                 (Cow::Borrowed(spki_der), last_sequence_id)
             } else {
                 let (AuthMoreData(resp), last_sequence_id) = request(
-                    &PublicKeyRequest,
-                    stream,
+                    PublicKeyRequest,
+                    &mut stream,
                     last_sequence_id + 1,
                     con_info.client_capabilities,
                 )?
@@ -158,7 +158,7 @@ impl super::Authentication for CachedSHA256<'_> {
             .encrypt(&mut rand::thread_rng(), padding, &scrambled_password)
             .expect("Failed to encrypt password");
 
-        write_packet_sync(stream, &auth_response, last_sequence_id + 1)?;
+        write_packet_sync(&mut stream, auth_response, last_sequence_id + 1)?;
         stream.flush()?;
         GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
             .into_result()
@@ -183,7 +183,7 @@ where
 
                 write_packet(
                     &mut stream,
-                    &con_info
+                    con_info
                         .make_handshake_response(&[], Some(<Self as super::Authentication>::NAME)),
                     first_sequence_id,
                 )
@@ -208,7 +208,7 @@ where
 
             write_packet(
                 &mut stream,
-                &con_info.make_handshake_response(
+                con_info.make_handshake_response(
                     &auth_response,
                     Some(<Self as super::Authentication>::NAME),
                 ),
@@ -237,7 +237,7 @@ where
                 if let Some(spki_der) = self.0.server_spki_der {
                     (Cow::Borrowed(spki_der), last_sequence_id)
                 } else {
-                    write_packet(&mut stream, &PublicKeyRequest, 0).await?;
+                    write_packet(&mut stream, PublicKeyRequest, 0).await?;
                     stream.flush().await?;
                     let (AuthMoreData(resp), last_sequence_id) =
                         AuthMoreDataResponse::read_packet_async(
@@ -275,7 +275,7 @@ where
                     .expect("Failed to encrypt password")
             };
 
-            write_packet(&mut stream, &auth_response, last_sequence_id + 1).await?;
+            write_packet(&mut stream, auth_response, last_sequence_id + 1).await?;
             stream.flush().await?;
             GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
                 .await?

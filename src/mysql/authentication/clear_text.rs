@@ -17,7 +17,7 @@ impl super::Authentication for ClearText {
 
     fn run_sync(
         &self,
-        stream: &mut (impl Read + Write + ?Sized),
+        mut stream: impl Read + Write,
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
@@ -26,8 +26,8 @@ impl super::Authentication for ClearText {
         buf.push(0);
 
         write_packet_sync(
-            stream,
-            &con_info.make_handshake_response(&buf, Some(Self::NAME)),
+            &mut stream,
+            con_info.make_handshake_response(&buf, Some(Self::NAME)),
             first_sequence_id,
         )?;
         stream.flush()?;
@@ -56,8 +56,7 @@ where
 
             write_packet(
                 &mut stream,
-                &con_info
-                    .make_handshake_response(&buf, Some(<Self as super::Authentication>::NAME)),
+                con_info.make_handshake_response(&buf, Some(<Self as super::Authentication>::NAME)),
                 first_sequence_id,
             )
             .await?;

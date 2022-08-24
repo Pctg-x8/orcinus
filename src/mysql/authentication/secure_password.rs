@@ -34,7 +34,7 @@ impl super::Authentication for Native41<'_> {
 
     fn run_sync(
         &self,
-        stream: &mut (impl std::io::Read + std::io::Write + ?Sized),
+        mut stream: impl std::io::Read + std::io::Write,
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
@@ -45,8 +45,8 @@ impl super::Authentication for Native41<'_> {
         );
 
         write_packet_sync(
-            stream,
-            &con_info.make_handshake_response(&payload, Some(Self::NAME)),
+            &mut stream,
+            con_info.make_handshake_response(&payload, Some(Self::NAME)),
             first_sequence_id,
         )?;
         stream.flush()?;
@@ -77,7 +77,7 @@ where
 
             write_packet(
                 &mut stream,
-                &con_info
+                con_info
                     .make_handshake_response(&payload, Some(<Self as super::Authentication>::NAME)),
                 first_sequence_id,
             )

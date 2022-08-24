@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use futures_util::{future::BoxFuture, FutureExt};
+use futures_util::{future::BoxFuture, FutureExt, TryFutureExt};
 use tokio::io::AsyncRead;
 
 use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
@@ -116,7 +116,7 @@ pub struct StmtPrepareOk {
     pub num_params: u16,
     pub warning_count: u16,
 }
-DefFormatStruct!(RawStmtPrepareOk(RawStmtPrepareOkFormat) {
+DefFormatStruct!(pub RawStmtPrepareOk(RawStmtPrepareOkFormat) {
     statement_id(u32) <- format::U32,
     num_columns(u16) <- format::U16,
     num_params(u16) <- format::U16,
@@ -133,16 +133,28 @@ impl From<RawStmtPrepareOk> for StmtPrepareOk {
         }
     }
 }
-impl StmtPrepareOk {
-    pub async fn read(reader: impl AsyncRead + Send + Unpin) -> std::io::Result<Self> {
+
+pub struct StmtPrepareOkFormat;
+impl ProtocolFormatFragment for StmtPrepareOkFormat {
+    type Output = StmtPrepareOk;
+
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
+        RawStmtPrepareOkFormat.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for StmtPrepareOkFormat
+where
+    R: AsyncRead + Send + Unpin + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawStmtPrepareOkFormat as AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawStmtPrepareOk) -> StmtPrepareOk,
+    >;
+
+    fn read_format(self, reader: R) -> Self::ReaderF {
         RawStmtPrepareOkFormat
             .read_format(reader)
-            .await
-            .map(From::from)
-    }
-
-    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        RawStmtPrepareOkFormat.read_sync(reader).map(From::from)
+            .map_ok(From::from)
     }
 }
 
@@ -166,10 +178,10 @@ impl StmtPrepareResult {
 }
 impl super::ReceivePacket for StmtPrepareResult {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let first_byte = format::U8.read_sync(&mut reader)?;
 
@@ -180,7 +192,9 @@ impl super::ReceivePacket for StmtPrepareResult {
                 client_capability,
             )
             .map(From::from),
-            0x00 => StmtPrepareOk::read_sync(reader.into_inner()).map(From::from),
+            0x00 => StmtPrepareOkFormat
+                .read_sync(reader.into_inner())
+                .map(From::from),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -205,7 +219,8 @@ where
                 )
                 .await
                 .map(From::from),
-                0x00 => StmtPrepareOk::read(reader.into_inner())
+                0x00 => StmtPrepareOkFormat
+                    .read_format(reader.into_inner())
                     .await
                     .map(From::from),
                 _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
@@ -235,10 +250,10 @@ impl StmtExecuteResult {
 }
 impl super::ReceivePacket for StmtExecuteResult {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_byte = format::U8.read_sync(&mut reader)?;
 

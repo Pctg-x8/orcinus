@@ -37,7 +37,7 @@ impl PacketHeader {
 
 pub async fn write_packet(
     mut writer: impl AsyncWrite + Unpin,
-    payload: &(impl ClientPacket + ?Sized),
+    payload: impl ClientPacket,
     sequence_id: u8,
 ) -> std::io::Result<()> {
     let payload = payload.serialize_payload();
@@ -54,8 +54,8 @@ pub async fn write_packet(
     writer.write_all(&payload).await
 }
 pub fn write_packet_sync(
-    writer: &mut (impl Write + ?Sized),
-    payload: &(impl ClientPacket + ?Sized),
+    mut writer: impl Write,
+    payload: impl ClientPacket,
     sequence_id: u8,
 ) -> std::io::Result<()> {
     let payload = payload.serialize_payload();
@@ -78,8 +78,8 @@ pub async fn drop_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::
 
     Ok(())
 }
-pub fn drop_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<()> {
-    let header = format::PacketHeader.read_sync(reader)?;
+pub fn drop_packet_sync(mut reader: impl Read) -> std::io::Result<()> {
+    let header = format::PacketHeader.read_sync(&mut reader)?;
     let _discard = format::Bytes(header.payload_length as _).read_sync(reader)?;
 
     Ok(())
@@ -107,10 +107,7 @@ impl ClientPacket for Vec<u8> {
 /// A packet that knows how to receive it from server synchronously.
 pub trait ReceivePacket: Sized {
     /// Read a packet from reader.
-    fn read_packet(
-        reader: &mut (impl Read + ?Sized),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self>;
+    fn read_packet(reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self>;
 }
 /// A packet that knows how to receive it from server asynchronously.
 pub trait AsyncReceivePacket<'r, R>: Sized
@@ -130,16 +127,16 @@ pub trait ClientPacketIO: ClientPacket {
     type Receiver: ReceivePacket;
 }
 /// Synchronous communication between client and server.
-pub fn request<P: ClientPacketIO + ?Sized>(
-    msg: &P,
-    stream: &mut (impl Read + Write + ?Sized),
+pub fn request<P: ClientPacketIO>(
+    msg: P,
+    mut stream: impl Read + Write,
     sequence_id: u8,
     client_capability: CapabilityFlags,
 ) -> std::io::Result<P::Receiver>
 where
     P::Receiver: ReceivePacket,
 {
-    write_packet_sync(stream, msg, sequence_id)?;
+    write_packet_sync(&mut stream, msg, sequence_id)?;
     stream.flush()?;
     P::Receiver::read_packet(stream, client_capability)
 }
@@ -154,7 +151,7 @@ where
     P::Receiver: AsyncReceivePacket<'r, R>,
     R: AsyncRead + AsyncWrite + Unpin + Send + 'r,
 {
-    write_packet(&mut stream, &msg, sequence_id).await?;
+    write_packet(&mut stream, msg, sequence_id).await?;
     stream.flush().await?;
     P::Receiver::read_packet_async(stream, client_capability).await
 }
@@ -175,16 +172,13 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+    pub fn read_sync(mut reader: impl Read) -> std::io::Result<Self> {
         let mut first_byte = [0u8; 1];
         reader.read_exact(&mut first_byte)?;
         Self::read_ahead_sync(first_byte[0], reader)
     }
 
-    pub fn read_ahead_sync(
-        first_byte: u8,
-        reader: &mut (impl Read + ?Sized),
-    ) -> std::io::Result<Self> {
+    pub fn read_ahead_sync(first_byte: u8, mut reader: impl Read) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => {
@@ -354,10 +348,10 @@ impl OKPacket {
     }
 
     pub fn expected_read_packet_sync(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let header = format::U8.read_sync(&mut reader)?;
         assert_eq!(header, 0x00, "unexpected response packet header");
@@ -425,18 +419,18 @@ impl OKPacket {
 
     pub fn read_sync(
         payload_length: usize,
-        reader: &mut ReadCountedSync<impl Read>,
+        mut reader: &mut ReadCountedSync<impl Read>,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let ch = RawOKPacketCommonHeaderFormat.read_sync(reader)?;
+        let ch = RawOKPacketCommonHeaderFormat.read_sync(&mut reader)?;
 
         let capability_extra = if client_capability.support_41_protocol() {
             RawOKPacket41ExtFormat
-                .read_sync(reader)
+                .read_sync(&mut reader)
                 .map(|x| Some(x.into()))?
         } else if client_capability.support_transaction() {
             RawOKPacketTransactionsExtFormat
-                .read_sync(reader)
+                .read_sync(&mut reader)
                 .map(|x| Some(x.into()))?
         } else {
             None
@@ -449,7 +443,7 @@ impl OKPacket {
 
         let (info, session_state_changes);
         if client_capability.support_session_track() {
-            info = format::LengthEncodedString.read_sync(reader)?;
+            info = format::LengthEncodedString.read_sync(&mut reader)?;
             session_state_changes = if st.has_state_changed() {
                 format::LengthEncodedString.read_sync(reader).map(Some)?
             } else {
@@ -517,13 +511,13 @@ impl ErrPacket {
 
     pub fn read_sync(
         payload_size: usize,
-        reader: &mut ReadCountedSync<impl Read>,
+        mut reader: &mut ReadCountedSync<impl Read>,
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let code = format::U16.read_sync(reader)?;
+        let code = format::U16.read_sync(&mut reader)?;
         let sql_state = if client_capabilities.support_41_protocol() {
-            let _ = format::FixedBytes::<1>.read_sync(reader)?;
-            format::FixedBytes::<5>.map(Some).read_sync(reader)?
+            let _ = format::FixedBytes::<1>.read_sync(&mut reader)?;
+            format::FixedBytes::<5>.map(Some).read_sync(&mut reader)?
         } else {
             None
         };
@@ -569,8 +563,8 @@ impl EOFPacket41 {
         EOFPacket41Format.read_format(reader).await
     }
 
-    pub fn expected_read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        let _ = RawEOFPacket41ExpectHeaderFormat.read_sync(reader)?;
+    pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
+        let _ = RawEOFPacket41ExpectHeaderFormat.read_sync(&mut reader)?;
         EOFPacket41Format.read_sync(reader)
     }
 }
@@ -579,7 +573,7 @@ pub struct EOFPacket41Format;
 impl format::ProtocolFormatFragment for EOFPacket41Format {
     type Output = EOFPacket41;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         RawEOFPacket41Format.read_sync(reader).map(From::from)
     }
 }
@@ -619,10 +613,10 @@ impl GenericOKErrPacket {
 }
 impl ReceivePacket for GenericOKErrPacket {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let first_byte = format::U8.read_sync(&mut reader)?;
 

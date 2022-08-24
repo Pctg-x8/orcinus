@@ -50,7 +50,7 @@ async fn main() {
             if capability.support_41_protocol() {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse41 {
+                    orcinus::protos::HandshakeResponse41 {
                         capability,
                         max_packet_size: 16777216,
                         character_set: 0xff,
@@ -67,7 +67,7 @@ async fn main() {
             } else {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse320 {
+                    orcinus::protos::HandshakeResponse320 {
                         capability,
                         max_packet_size: 16777216,
                         username: "root",
@@ -91,7 +91,7 @@ async fn main() {
             if capability.support_41_protocol() {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse41 {
+                    orcinus::protos::HandshakeResponse41 {
                         capability,
                         max_packet_size: 16777216,
                         character_set: 0xff,
@@ -108,7 +108,7 @@ async fn main() {
             } else {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse320 {
+                    orcinus::protos::HandshakeResponse320 {
                         capability,
                         max_packet_size: 16777216,
                         username: "root",
@@ -139,7 +139,7 @@ async fn main() {
             if capability.support_41_protocol() {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse41 {
+                    orcinus::protos::HandshakeResponse41 {
                         capability,
                         max_packet_size: 16777216,
                         character_set: 0xff,
@@ -156,7 +156,7 @@ async fn main() {
             } else {
                 orcinus::protos::write_packet(
                     &mut stream,
-                    &orcinus::protos::HandshakeResponse320 {
+                    orcinus::protos::HandshakeResponse320 {
                         capability,
                         max_packet_size: 16777216,
                         username: "root",
@@ -191,7 +191,7 @@ async fn main() {
 
     orcinus::protos::write_packet(
         &mut stream,
-        &orcinus::protos::QueryCommand("Select * from test_data"),
+        orcinus::protos::QueryCommand("Select * from test_data"),
         0,
     )
     .await
@@ -250,7 +250,7 @@ async fn main() {
 
     orcinus::protos::write_packet(
         &mut stream,
-        &orcinus::protos::StmtPrepareCommand("Select * from test_data where id=?"),
+        orcinus::protos::StmtPrepareCommand("Select * from test_data where id=?"),
         0,
     )
     .await
@@ -294,7 +294,7 @@ async fn main() {
     let parameters = [(orcinus::protos::Value::Long(7), false)];
     orcinus::protos::write_packet(
         &mut stream,
-        &orcinus::protos::StmtExecuteCommand {
+        orcinus::protos::StmtExecuteCommand {
             statement_id: resp.statement_id,
             flags: orcinus::protos::StmtExecuteFlags::new(),
             parameters: &parameters,
@@ -344,13 +344,13 @@ async fn main() {
 
     orcinus::protos::write_packet(
         &mut stream,
-        &orcinus::protos::StmtCloseCommand(resp.statement_id),
+        orcinus::protos::StmtCloseCommand(resp.statement_id),
         0,
     )
     .await
     .expect("Failed to write stmt close command");
 
-    orcinus::protos::write_packet(&mut stream, &orcinus::protos::QuitCommand, 0)
+    orcinus::protos::write_packet(&mut stream, orcinus::protos::QuitCommand, 0)
         .await
         .expect("Failed to send quit command");
     stream.flush().await.expect("Failed to flush buffer");

@@ -41,7 +41,7 @@ pub struct HandshakeV10ShortFormat;
 impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
     type Output = HandshakeV10Short;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         RawHandshakeV10ShortProtocolFormat
             .read_sync(reader)
             .map(From::from)
@@ -120,16 +120,16 @@ impl HandshakeV10Long {
 
     pub fn read_additional_sync(
         short: HandshakeV10Short,
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
     ) -> std::io::Result<Self> {
-        let head = RawHandshakeV10ExtHeadProtocolFormat.read_sync(reader)?;
+        let head = RawHandshakeV10ExtHeadProtocolFormat.read_sync(&mut reader)?;
         let capability_flags = short
             .capability_flags
             .combine_upper_bytes(head.capability_flags_upper_bits);
 
         let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
             format::Bytes(13.max(head.auth_plugin_data_length - 8) as _)
-                .read_sync(reader)
+                .read_sync(&mut reader)
                 .map(Some)?
         } else {
             None
@@ -178,7 +178,7 @@ pub struct HandshakeV9Format;
 impl format::ProtocolFormatFragment for HandshakeV9Format {
     type Output = HandshakeV9;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         RawHandshakeV9Format.read_sync(reader).map(From::from)
     }
 }
@@ -232,7 +232,7 @@ impl Handshake {
         Ok((decoded_payload, packet_header.sequence_id))
     }
 
-    pub fn read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<(Self, u8)> {
+    pub fn read_packet_sync(mut reader: impl Read) -> std::io::Result<(Self, u8)> {
         ReadSync!(reader => {
             packet_header <- format::PacketHeader,
             protocol_version <- format::U8
@@ -423,8 +423,8 @@ impl AuthMoreData {
         Self::read(packet_header.payload_length as _, &mut reader).await
     }
 
-    pub fn expected_read_packet_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+    pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let heading = format::U8.read_sync(&mut reader)?;
         assert_eq!(heading, 0x01, "invalid AuthMoreData packet");
@@ -468,10 +468,10 @@ impl AuthMoreDataResponse {
 }
 impl ReceivePacket for AuthMoreDataResponse {
     fn read_packet(
-        reader: &mut (impl Read + ?Sized),
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = format::PacketHeader.read_sync(reader)?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let heading = format::U8.read_sync(&mut reader)?;
 

@@ -59,7 +59,7 @@ pub trait Authentication {
 
     fn run_sync(
         &self,
-        stream: &mut (impl Read + Write + ?Sized),
+        stream: impl Read + Write,
         con_info: &ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError>;

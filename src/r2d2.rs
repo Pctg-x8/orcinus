@@ -91,8 +91,7 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlTcpConnec
         let mut c = self.lock();
         let cap = c.capability;
 
-        let resp =
-            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
+        let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
@@ -174,8 +173,7 @@ impl<A: ToSocketAddrs + Sync + Send + 'static> SharedPooledClient<MysqlConnectio
         let mut c = self.lock();
         let cap = c.capability();
 
-        let resp =
-            request(&StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
+        let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {

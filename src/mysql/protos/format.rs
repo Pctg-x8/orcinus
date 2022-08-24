@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 pub trait ProtocolFormatFragment {
     type Output;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output>;
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output>;
 
     /// (<$>) operator
     #[inline]
@@ -371,7 +371,7 @@ impl ProtocolFormatFragment for U8 {
     type Output = u8;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = [0u8; 1];
         reader.read_exact(&mut b)?;
         Ok(b[0])
@@ -391,7 +391,7 @@ impl ProtocolFormatFragment for U16 {
     type Output = u16;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = [0u8; 2];
         reader.read_exact(&mut b)?;
         Ok(u16::from_le_bytes(b))
@@ -411,7 +411,7 @@ impl ProtocolFormatFragment for U32 {
     type Output = u32;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = [0u8; 4];
         reader.read_exact(&mut b)?;
         Ok(u32::from_le_bytes(b))
@@ -431,7 +431,7 @@ impl ProtocolFormatFragment for LengthEncodedInteger {
     type Output = u64;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         super::LengthEncodedInteger::read_sync(reader).map(|x| x.0)
     }
 }
@@ -451,7 +451,7 @@ impl ProtocolFormatFragment for LengthEncodedIntegerAhead {
     type Output = u64;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         super::LengthEncodedInteger::read_ahead_sync(self.0, reader).map(|x| x.0)
     }
 }
@@ -471,7 +471,7 @@ impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
     type Output = [u8; L];
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = [0u8; L];
         reader.read_exact(&mut b)?;
         Ok(b)
@@ -493,7 +493,7 @@ impl ProtocolFormatFragment for Bytes {
     type Output = Vec<u8>;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = Vec::with_capacity(self.0);
         unsafe {
             b.set_len(self.0);
@@ -516,7 +516,7 @@ impl ProtocolFormatFragment for BytesAhead {
     type Output = Vec<u8>;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = Vec::with_capacity(self.1);
         unsafe {
             b.set_len(self.1);
@@ -540,7 +540,7 @@ impl ProtocolFormatFragment for NullTerminatedString {
     type Output = String;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut collected = Vec::new();
         let mut rb = [0u8; 1];
 
@@ -570,7 +570,7 @@ impl ProtocolFormatFragment for FixedLengthString {
     type Output = String;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut b = Vec::with_capacity(self.0);
         unsafe {
             b.set_len(self.0);
@@ -598,8 +598,8 @@ impl ProtocolFormatFragment for LengthEncodedString {
     type Output = String;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
-        let len = LengthEncodedInteger.read_sync(reader)?;
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
+        let len = LengthEncodedInteger.read_sync(&mut reader)?;
         FixedLengthString(len as _).read_sync(reader)
     }
 }
@@ -624,7 +624,7 @@ impl ProtocolFormatFragment for PacketHeader {
     type Output = super::PacketHeader;
 
     #[inline]
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
         let mut ph = [0u8; 4];
         reader.read_exact(&mut ph)?;
 
@@ -649,7 +649,7 @@ where
 {
     type Output = R;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         self.0.read_sync(reader).map(self.1)
     }
 }
@@ -675,7 +675,7 @@ where
 {
     type Output = PF::Output;
 
-    fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         let v = self.0.read_sync(reader)?;
         assert_eq!(v, self.1);
         Ok(v)
@@ -705,9 +705,9 @@ macro_rules! ProtocolFormatFragmentGroup {
             type Output = ($($a::Output),+);
 
             #[inline]
-            fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+            fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
                 #![allow(non_snake_case)]
-                $(let $a = self.$n.read_sync(reader)?;)+
+                $(let $a = self.$n.read_sync(&mut reader)?;)+
 
                 Ok(($($a),+))
             }
@@ -764,7 +764,7 @@ ProtocolFormatFragmentGroup!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 
 macro_rules! ReadSync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
         $(
-            let $val = $fmt.read_sync($reader)?;
+            let $val = $fmt.read_sync(&mut $reader)?;
         )*
     }
 }
@@ -803,7 +803,7 @@ macro_rules! DefProtocolFormat {
             type Output = $struct_name;
 
             #[inline]
-            fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+            fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
                 $crate::ReadSync!(reader => { $($val <- $fmt),* });
 
                 Ok($struct_name { $($val),* })
@@ -833,7 +833,7 @@ macro_rules! DefProtocolFormat {
             type Output = $struct_name;
 
             #[inline]
-            fn read_sync(self, reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self::Output> {
+            fn read_sync(self, mut reader: impl Read) -> std::io::Result<Self::Output> {
                 $crate::ReadSync!(reader => { $($val <- $fmt),* });
 
                 Ok($struct_name { $($val),* })
