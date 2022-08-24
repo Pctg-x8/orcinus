@@ -1,5 +1,5 @@
 [hooks]
-pre-commit = "make -C .github/workflow"
+pre-commit = "make -C .github/workflow && git add .github"
 
 [logging]
 verbose = true
