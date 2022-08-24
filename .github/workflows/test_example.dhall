@@ -37,7 +37,7 @@ let runExampleStep =
               else  "--features ${Text/concatSep "," features}"
 
         in  GHA.Step::{
-            , name = "Run Example: ${name}"
+            , name = "Run Example(${name})"
             , run = Some "cargo run --example ${name} ${featuresOption}"
             }
 
