@@ -719,6 +719,8 @@ where
     }
 }
 
+mod async_utils;
+
 #[cfg(feature = "r2d2-integration")]
 pub mod r2d2;
 
