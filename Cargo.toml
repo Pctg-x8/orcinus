@@ -10,7 +10,7 @@ readme = "README.md"
 license-file = "LICENSE"
 keywords = ["mysql"]
 categories = ["asynchronous", "database"]
-exclude = ["examples/", ".vscode"]
+exclude = ["examples/", ".vscode", ".github"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -44,3 +44,4 @@ webpki = "0.22"
 webpki-roots = "0.22.4"
 tokio-rustls = "0.23.4"
 rustls = { version = "0.20.6", features = ["dangerous_configuration"] }
+rusty-hook = "0.11.2"
