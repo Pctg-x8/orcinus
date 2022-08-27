@@ -43,7 +43,16 @@ let runExampleStep =
 
 in  GHA.Workflow::{
     , name = Some "Example Test"
-    , on = GHA.On.Single GHA.UnparameterizedTrigger.push
+    , on =
+        GHA.On.Detailed
+          GHA.OnDetails::{
+          , pull_request = Some GHA.OnPullRequest::{
+            , types = Some
+              [ GHA.PullRequestTriggerTypes.opened
+              , GHA.PullRequestTriggerTypes.synchronize
+              ]
+            }
+          }
     , jobs = toMap
         { main = GHA.Job::{
           , runs-on = GHA.RunnerPlatform.ubuntu-latest

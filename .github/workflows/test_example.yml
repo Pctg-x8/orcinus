@@ -31,4 +31,8 @@ jobs:
       - name: "Run Example(bb8_autossl)"
         run: "cargo run --example bb8_autossl --features bb8-integration,autossl"
 name: Example Test
-on: push
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
