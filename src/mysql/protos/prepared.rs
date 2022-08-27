@@ -1,12 +1,20 @@
-use tokio::io::AsyncReadExt;
+use std::io::Read;
 
-use crate::{PacketReader, ReadCounted};
+use futures_util::{future::BoxFuture, FutureExt, TryFutureExt};
+use tokio::io::AsyncRead;
 
-use super::{
-    serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
-    LengthEncodedInteger, OKPacket, Value,
+use crate::{
+    counted_read::{ReadCounted, ReadCountedSync},
+    DefFormatStruct,
 };
 
+use super::{
+    format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
+    serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket, GenericOKErrPacket,
+    OKPacket, Value,
+};
+
+/// Creates a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-prepare.html
 pub struct StmtPrepareCommand<'s>(pub &'s str);
 impl super::ClientPacket for StmtPrepareCommand<'_> {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -17,7 +25,11 @@ impl super::ClientPacket for StmtPrepareCommand<'_> {
         sink
     }
 }
+impl super::ClientPacketIO for StmtPrepareCommand<'_> {
+    type Receiver = StmtPrepareResult;
+}
 
+/// Deallocates a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-close.html
 pub struct StmtCloseCommand(pub u32);
 impl super::ClientPacket for StmtCloseCommand {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -29,6 +41,7 @@ impl super::ClientPacket for StmtCloseCommand {
     }
 }
 
+/// Resets prepared statement data: https://dev.mysql.com/doc/internals/en/com-stmt-reset.html
 pub struct StmtResetCommand(pub u32);
 impl super::ClientPacket for StmtResetCommand {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -39,9 +52,13 @@ impl super::ClientPacket for StmtResetCommand {
         sink
     }
 }
+impl super::ClientPacketIO for StmtResetCommand {
+    type Receiver = GenericOKErrPacket;
+}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+/// Execution Flags for Prepared Statement: https://dev.mysql.com/doc/internals/en/com-stmt-execute.html
 pub struct StmtExecuteFlags(u8);
 impl StmtExecuteFlags {
     pub const fn new() -> Self {
@@ -64,6 +81,7 @@ impl StmtExecuteFlags {
     }
 }
 
+/// Execute a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-execute.html
 pub struct StmtExecuteCommand<'p> {
     pub statement_id: u32,
     pub flags: StmtExecuteFlags,
@@ -80,11 +98,7 @@ impl super::ClientPacket for StmtExecuteCommand<'_> {
         sink.extend(1u32.to_le_bytes()); // iteration count
         if self.parameters.len() > 0 {
             serialize_null_bitmap(&self.parameters, &mut sink);
-            sink.push(if self.requires_rebound_parameters {
-                0x01
-            } else {
-                0x00
-            });
+            sink.push(if self.requires_rebound_parameters { 0x01 } else { 0x00 });
 
             if self.requires_rebound_parameters {
                 serialize_value_types(self.parameters.iter().map(|&(ref a, b)| (a, b)), &mut sink);
@@ -95,103 +109,179 @@ impl super::ClientPacket for StmtExecuteCommand<'_> {
         sink
     }
 }
+impl super::ClientPacketIO for StmtExecuteCommand<'_> {
+    type Receiver = StmtExecuteResult;
+}
 
 #[derive(Debug)]
+/// OK Response for Prepared Statement: https://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html
 pub struct StmtPrepareOk {
     pub statement_id: u32,
     pub num_columns: u16,
     pub num_params: u16,
     pub warning_count: u16,
 }
-impl StmtPrepareOk {
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Self> {
-        let statement_id = reader.read_u32_le().await?;
-        let num_columns = reader.read_u16_le().await?;
-        let num_params = reader.read_u16_le().await?;
-        let mut _filler = [0u8; 1];
-        reader.read_exact(&mut _filler).await?;
-        let warning_count = reader.read_u16_le().await?;
+DefFormatStruct!(pub RawStmtPrepareOk(RawStmtPrepareOkFormat) {
+    statement_id(u32) <- format::U32,
+    num_columns(u16) <- format::U16,
+    num_params(u16) <- format::U16,
+    _filler([u8; 1]) <- format::FixedBytes::<1>,
+    warning_count(u16) <- format::U16
+});
+impl From<RawStmtPrepareOk> for StmtPrepareOk {
+    fn from(r: RawStmtPrepareOk) -> Self {
+        Self {
+            statement_id: r.statement_id,
+            num_columns: r.num_columns,
+            num_params: r.num_params,
+            warning_count: r.warning_count,
+        }
+    }
+}
 
-        Ok(Self {
-            statement_id,
-            num_columns,
-            num_params,
-            warning_count,
-        })
+/// Format Fragment for `StmtPrepareOk`
+pub struct StmtPrepareOkFormat;
+impl ProtocolFormatFragment for StmtPrepareOkFormat {
+    type Output = StmtPrepareOk;
+
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
+        RawStmtPrepareOkFormat.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for StmtPrepareOkFormat
+where
+    R: AsyncRead + Send + Unpin + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawStmtPrepareOkFormat as AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawStmtPrepareOk) -> StmtPrepareOk,
+    >;
+
+    fn read_format(self, reader: R) -> Self::ReaderF {
+        RawStmtPrepareOkFormat.read_format(reader).map_ok(From::from)
     }
 }
 
 #[derive(Debug)]
-pub enum StmtPrepareResult {
-    Ok(StmtPrepareOk),
-    Err(ErrPacket),
+/// Statement Prepare OK or Errored
+pub struct StmtPrepareResult(Result<StmtPrepareOk, ErrPacket>);
+impl From<StmtPrepareOk> for StmtPrepareResult {
+    fn from(r: StmtPrepareOk) -> Self {
+        Self(Ok(r))
+    }
+}
+impl From<ErrPacket> for StmtPrepareResult {
+    fn from(r: ErrPacket) -> Self {
+        Self(Err(r))
+    }
 }
 impl StmtPrepareResult {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
-        client_capabilities: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let first_byte = reader.read_u8().await?;
+    /// Converts into `Result`
+    #[inline]
+    pub fn into_result(self) -> Result<StmtPrepareOk, ErrPacket> {
+        self.0
+    }
+}
+impl super::ReceivePacket for StmtPrepareResult {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let first_byte = format::U8.read_sync(&mut reader)?;
 
         match first_byte {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Err),
-            0x00 => StmtPrepareOk::read(reader.into_inner()).await.map(Self::Ok),
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(From::from)
+            }
+            0x00 => StmtPrepareOkFormat.read_sync(reader.into_inner()).map(From::from),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
+}
+impl<'r, R> super::AsyncReceivePacket<'r, R> for StmtPrepareResult
+where
+    R: AsyncRead + Unpin + Send + Sync + 'r,
+{
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
 
-    #[inline]
-    pub fn into_result(self) -> Result<StmtPrepareOk, ErrPacket> {
-        match self {
-            Self::Ok(o) => Ok(o),
-            Self::Err(e) => Err(e),
+    fn read_packet_async(mut reader: R, client_capabilities: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let first_byte = format::U8.read_format(&mut reader).await?;
+
+            match first_byte {
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(From::from),
+                0x00 => StmtPrepareOkFormat
+                    .read_format(reader.into_inner())
+                    .await
+                    .map(From::from),
+                _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
+            }
         }
+        .boxed()
     }
 }
 
 #[derive(Debug)]
+/// Result of Prepared Statement Execution: https://dev.mysql.com/doc/internals/en/com-stmt-execute-response.html
 pub enum StmtExecuteResult {
     Resultset { column_count: u64 },
     Err(ErrPacket),
     Ok(OKPacket),
 }
 impl StmtExecuteResult {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
-        client_capabilities: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let r1 = reader.read_u8().await?;
+    #[inline]
+    const fn resultset_format(
+        head_byte: u8,
+    ) -> format::Mapped<format::LengthEncodedIntegerAhead, fn(u64) -> StmtExecuteResult> {
+        fn make_resultset(column_count: u64) -> StmtExecuteResult {
+            StmtExecuteResult::Resultset { column_count }
+        }
 
-        match r1 {
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Ok),
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Err),
-            _ => {
-                let LengthEncodedInteger(column_count) =
-                    LengthEncodedInteger::read_ahead(r1, reader.into_inner()).await?;
-                Ok(Self::Resultset { column_count })
+        format::Mapped(format::LengthEncodedIntegerAhead(head_byte), make_resultset)
+    }
+}
+impl super::ReceivePacket for StmtExecuteResult {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_byte = format::U8.read_sync(&mut reader)?;
+
+        match head_byte {
+            0x00 => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
+            _ => Self::resultset_format(head_byte).read_sync(reader.into_inner()),
+        }
+    }
+}
+impl<'r, R> super::AsyncReceivePacket<'r, R> for StmtExecuteResult
+where
+    R: AsyncRead + Unpin + Send + Sync + 'r,
+{
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
+
+    fn read_packet_async(mut reader: R, client_capabilities: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let head_byte = format::U8.read_format(&mut reader).await?;
+
+            match head_byte {
+                0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Ok),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Err),
+                _ => Self::resultset_format(head_byte).read_format(reader.into_inner()).await,
             }
         }
+        .boxed()
     }
 }

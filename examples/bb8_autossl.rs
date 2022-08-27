@@ -1,18 +1,46 @@
 use futures_util::TryStreamExt;
 use orcinus::SharedMysqlClient;
 
+/// do not use this at other of localhost connection
+pub struct MysqlCertForceVerifier;
+impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..]).expect("invalid certificate format");
+        println!("end entity subject: {}", cert.1.subject);
+
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let stream = tokio::net::TcpStream::connect("127.0.0.1:3306")
-        .await
-        .expect("Failed to connect");
-    let stream = tokio::io::BufStream::new(stream);
+    let mut cc = tokio_rustls::rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(std::sync::Arc::new(MysqlCertForceVerifier))
+        .with_no_client_auth();
+    cc.enable_sni = false;
 
-    let connect_info = orcinus::ConnectInfo::new("root", "root").database("test");
-    let mut client = orcinus::Client::handshake(stream, &connect_info)
+    let pool = bb8::Pool::builder()
+        .build(orcinus::bb8::MysqlConnection {
+            addr: "127.0.0.1:3306",
+            server_name: rustls::ServerName::try_from("localhost").expect("invalid host name"),
+            con_info: orcinus::autossl_client::SSLConnectInfo {
+                base: orcinus::ConnectInfo::new("root", "root").database("test"),
+                ssl_config: std::sync::Arc::new(cc),
+            },
+        })
         .await
-        .expect("Failed to connect to db server");
+        .expect("Failed to connect with r2d2");
 
+    let mut client = pool.get().await.expect("Failed to get connection from pool");
     {
         let mut row_stream = client
             .fetch_all("Select * from test_data")
@@ -26,7 +54,7 @@ async fn main() {
         println!("enumeration end: more_result={:?}", row_stream.has_more_resultset());
     }
 
-    let client = client.share();
+    let client = orcinus::SharedClient::share_from(client);
     let mut stmt = client
         .prepare("Select * from test_data where id=?")
         .await
@@ -63,6 +91,6 @@ async fn main() {
         );
     }
 
-    stmt.close().await.expect("Failed to close stmt");
+    stmt.close().await.expect("Failed to close statement");
     client.unshare().quit().await.expect("Failed to quit client");
 }

@@ -1,19 +1,27 @@
-//! Binary Protocol
+//! Binary Protocol Implementation
 
 use std::io::Read;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncRead;
 
-use crate::{PacketReader, ReadCounted};
+use crate::counted_read::{ReadCounted, ReadCountedSync};
 
 use super::{
-    CapabilityFlags, ColumnType, EOFPacket41, ErrPacket, LengthEncodedInteger, OKPacket, Value,
+    format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
+    CapabilityFlags, ColumnType, EOFPacket41, EOFPacket41Format, ErrPacket, LengthEncodedInteger, OKPacket, Value,
 };
 
+/// Binary Protocol Value format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
+pub trait ValueFormat {
+    /// Serialize value into bytes
+    fn serialize_into(&self, sink: &mut Vec<u8>);
+}
+
 #[repr(transparent)]
+/// ByteString style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct ByteString<'s>(pub &'s [u8]);
-impl ByteString<'_> {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for ByteString<'_> {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.reserve(1 + self.0.len());
         unsafe {
             LengthEncodedInteger(self.0.len() as _)
@@ -24,27 +32,35 @@ impl ByteString<'_> {
     }
 }
 impl<'s> ByteString<'s> {
-    pub fn slice_from(reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
-        let LengthEncodedInteger(len) = LengthEncodedInteger::read_sync(reader)?;
+    /// Slice from preloaded payload
+    ///
+    /// This operation is copyless
+    pub fn slice_from(mut reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
+        let len = format::LengthEncodedInteger.read_sync(&mut reader)?;
         let s = &reader.get_ref()[reader.position() as usize..(reader.position() + len) as usize];
         reader.set_position(reader.position() + len);
         Ok(Self(s))
     }
 
+    /// Treat content as str
+    ///
+    /// This function does not check whether the content is a valid UTF-8 sequence
     pub unsafe fn as_str_unchecked(&self) -> &'s str {
         std::str::from_utf8_unchecked(self.0)
     }
 }
 
 #[repr(transparent)]
+/// LongLong style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct LongLong(pub u64);
-impl LongLong {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(8);
+impl ValueFormat for LongLong {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+}
+impl LongLong {
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
         Ok(Self(u64::from_le_bytes(bs)))
@@ -52,58 +68,61 @@ impl LongLong {
 }
 
 #[repr(transparent)]
+/// Int style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Int(pub u32);
+impl ValueFormat for Int {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
+        sink.extend(self.0.to_le_bytes());
+    }
+}
 impl Int {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(4);
-        sink.extend(self.0.to_le_bytes());
-    }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 4];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(u32::from_le_bytes(bs)))
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U32.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Short style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Short(pub u16);
-impl Short {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(2);
+impl ValueFormat for Short {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 2];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(u16::from_le_bytes(bs)))
+}
+impl Short {
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U16.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Tiny style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Tiny(pub u8);
-impl Tiny {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Tiny {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.push(self.0);
     }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
-        let mut bs = [0u8; 1];
-        reader.read_exact(&mut bs)?;
-        Ok(Self(bs[0]))
+}
+impl Tiny {
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
+        format::U8.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Double style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Double(pub f64);
-impl Double {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(8);
+impl ValueFormat for Double {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+}
+impl Double {
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
         Ok(Self(f64::from_le_bytes(bs)))
@@ -111,14 +130,16 @@ impl Double {
 }
 
 #[repr(transparent)]
+/// Float style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Float(pub f32);
-impl Float {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
-        sink.reserve(4);
+impl ValueFormat for Float {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+}
+impl Float {
+    /// Read a value
+    pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 4];
         reader.read_exact(&mut bs)?;
         Ok(Self(f32::from_le_bytes(bs)))
@@ -127,16 +148,22 @@ impl Float {
 
 // TODO: date time formats
 
-pub trait BinaryProtocolValueDeconstructor {
+/// An value of binary protocol
+pub trait BinaryProtocolValue {
+    /// Serialize value into bytes
     fn serialize_into(&self, sink: &mut Vec<u8>);
+    /// A column type of the value
     fn column_type(&self) -> ColumnType;
+
+    /// Returns whether self is a null value
+    #[inline]
     fn is_null(&self) -> bool {
         self.column_type() == ColumnType::Null
     }
 }
-impl<'d, T> BinaryProtocolValueDeconstructor for &'d T
+impl<'d, T> BinaryProtocolValue for &'d T
 where
-    T: BinaryProtocolValueDeconstructor,
+    T: BinaryProtocolValue,
 {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
@@ -154,7 +181,7 @@ where
     }
 }
 
-impl BinaryProtocolValueDeconstructor for Value<'_> {
+impl BinaryProtocolValue for Value<'_> {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         match self {
@@ -214,7 +241,7 @@ impl BinaryProtocolValueDeconstructor for Value<'_> {
         matches!(self, Self::Null)
     }
 }
-impl<A> BinaryProtocolValueDeconstructor for (Value<'_>, A) {
+impl<A> BinaryProtocolValue for (Value<'_>, A) {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         self.0.serialize_into(sink)
@@ -231,7 +258,8 @@ impl<A> BinaryProtocolValueDeconstructor for (Value<'_>, A) {
     }
 }
 
-pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValueDeconstructor], sink: &mut Vec<u8>) {
+/// Serialize a [null bitmap](https://dev.mysql.com/doc/internals/en/binary-protocol-resultset-row.html) into bytes
+pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValue], sink: &mut Vec<u8>) {
     fn cv(b: bool, x: u8) -> u8 {
         if b {
             x
@@ -243,104 +271,77 @@ pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValueDeconstructor], s
     sink.reserve((values.len() + 7) / 8);
     for vs in values.chunks(8) {
         let mut f = 0u8;
-        f |= cv(
-            vs.get(0)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x01,
-        );
-        f |= cv(
-            vs.get(1)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x02,
-        );
-        f |= cv(
-            vs.get(2)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x04,
-        );
-        f |= cv(
-            vs.get(3)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x08,
-        );
-        f |= cv(
-            vs.get(4)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x10,
-        );
-        f |= cv(
-            vs.get(5)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x20,
-        );
-        f |= cv(
-            vs.get(6)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x40,
-        );
-        f |= cv(
-            vs.get(7)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x80,
-        );
+        f |= cv(vs.get(0).map_or(false, BinaryProtocolValue::is_null), 0x01);
+        f |= cv(vs.get(1).map_or(false, BinaryProtocolValue::is_null), 0x02);
+        f |= cv(vs.get(2).map_or(false, BinaryProtocolValue::is_null), 0x04);
+        f |= cv(vs.get(3).map_or(false, BinaryProtocolValue::is_null), 0x08);
+        f |= cv(vs.get(4).map_or(false, BinaryProtocolValue::is_null), 0x10);
+        f |= cv(vs.get(5).map_or(false, BinaryProtocolValue::is_null), 0x20);
+        f |= cv(vs.get(6).map_or(false, BinaryProtocolValue::is_null), 0x40);
+        f |= cv(vs.get(7).map_or(false, BinaryProtocolValue::is_null), 0x80);
 
         sink.push(f);
     }
 }
+
+/// Serialize value types into bytes
+///
 /// values: iterator of (value, unsigned_flag)
-pub fn serialize_value_types<'d>(
-    values: impl Iterator<Item = (&'d Value<'d>, bool)>,
-    sink: &mut Vec<u8>,
-) {
+pub fn serialize_value_types<'d>(values: impl Iterator<Item = (&'d Value<'d>, bool)>, sink: &mut Vec<u8>) {
     let (l, h) = values.size_hint();
     sink.reserve(h.unwrap_or(l));
     for (v, uf) in values {
         sink.extend([v.column_type() as u8, if uf { 0x80 } else { 0x00 }]);
     }
 }
-pub fn serialize_values<'d>(
-    values: impl Iterator<Item = impl BinaryProtocolValueDeconstructor>,
-    sink: &mut Vec<u8>,
-) {
+
+/// Serialize values into bytes
+pub fn serialize_values<'d>(values: impl Iterator<Item = impl BinaryProtocolValue>, sink: &mut Vec<u8>) {
     for v in values {
         v.serialize_into(sink);
     }
 }
 
+/// Single row in binary protocol representation: https://dev.mysql.com/doc/internals/en/binary-protocol-resultset-row.html
 #[derive(Debug)]
 pub struct BinaryResultsetRow {
+    /// bitmap of null values(extra 2 bits at head)
     pub null_bitmap: Vec<u8>,
+    /// values in binary format
     pub values: Vec<u8>,
 }
 impl BinaryResultsetRow {
+    /// Reads the payload
     pub async fn read(
         payload_length: usize,
         column_count: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        mut reader: &mut ReadCounted<impl AsyncRead + Sync + Send + Unpin>,
     ) -> std::io::Result<Self> {
-        let mut null_bitmap = Vec::with_capacity((column_count + 7 + 2) / 8);
-        unsafe {
-            null_bitmap.set_len((column_count + 7) / 8);
-        }
-        reader.read_exact(&mut null_bitmap).await?;
-        let rest_length = payload_length - reader.read_bytes();
-        let mut values = Vec::with_capacity(rest_length);
-        unsafe {
-            values.set_len(rest_length);
-        }
-        reader.read_exact(&mut values).await?;
+        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8)
+            .read_format(&mut reader)
+            .await?;
+        let values = format::Bytes(payload_length - reader.read_bytes())
+            .read_format(&mut reader)
+            .await?;
 
-        Ok(Self {
-            null_bitmap,
-            values,
-        })
+        Ok(Self { null_bitmap, values })
     }
 
+    /// Reads the payload
+    pub fn read_sync(
+        payload_length: usize,
+        column_count: usize,
+        mut reader: &mut ReadCountedSync<impl Read>,
+    ) -> std::io::Result<Self> {
+        let null_bitmap = format::Bytes((column_count + 7 + 2) / 8).read_sync(&mut reader)?;
+        let values = format::Bytes(payload_length - reader.read_bytes()).read_sync(reader)?;
+
+        Ok(Self { null_bitmap, values })
+    }
+
+    /// Decode values following passed column types.
     #[inline]
-    pub fn decode_values<'r, 'cs>(
-        &'r self,
-        column_types: &'cs [ColumnType],
-    ) -> BinaryResultsetRowValues<'r, 'cs> {
+    pub fn decode_values<'r, 'cs>(&'r self, column_types: &'cs [ColumnType]) -> BinaryResultsetRowValues<'r, 'cs> {
         BinaryResultsetRowValues {
             null_bitmap: &self.null_bitmap,
             values: std::io::Cursor::new(&self.values),
@@ -350,6 +351,7 @@ impl BinaryResultsetRow {
     }
 }
 
+/// An iterator decoding values from a binary protocol row
 pub struct BinaryResultsetRowValues<'r, 'cs> {
     null_bitmap: &'r [u8],
     values: std::io::Cursor<&'r [u8]>,
@@ -365,8 +367,7 @@ impl<'r> Iterator for BinaryResultsetRowValues<'r, '_> {
         }
 
         let null_bit_position = self.element_counter + 2; // 謎に+2されてるぶん
-        let is_null_value =
-            (self.null_bitmap[null_bit_position / 8] & (0x01 << (null_bit_position % 8))) != 0;
+        let is_null_value = (self.null_bitmap[null_bit_position / 8] & (0x01 << (null_bit_position % 8))) != 0;
         let ty = if is_null_value {
             ColumnType::Null
         } else {
@@ -382,6 +383,7 @@ impl<'r> Iterator for BinaryResultsetRowValues<'r, '_> {
     }
 }
 
+/// Resultset packet in binary protocol
 #[derive(Debug)]
 pub enum BinaryResultset41 {
     Row(BinaryResultsetRow),
@@ -390,43 +392,61 @@ pub enum BinaryResultset41 {
     EOF(EOFPacket41),
 }
 impl BinaryResultset41 {
+    const EOF_FORMAT: format::Mapped<EOFPacket41Format, fn(EOFPacket41) -> Self> =
+        format::Mapped(EOFPacket41Format, Self::EOF);
+
+    /// Reads the packet
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let r1 = reader.read_u8().await?;
+        let r1 = format::U8.read_format(&mut reader).await?;
 
         match r1 {
-            0xfe if !client_capabilities.support_deprecate_eof() => {
-                EOFPacket41::read(&mut reader).await.map(Self::EOF)
-            }
             // treat as OK Packet for client supports DEPRECATE_EOF capability
-            0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Ok),
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Err),
+            0xfe if client_capabilities.support_deprecate_eof() => {
+                OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Ok)
+            }
+            0xfe => Self::EOF_FORMAT.read_format(reader.into_inner()).await,
+            0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                .await
+                .map(Self::Err),
             // 0x00 is a normal resultset row in binary protocol(terminal packet is OK packet started with 0xfe)
-            0x00 => BinaryResultsetRow::read(
-                packet_header.payload_length as _,
-                column_count,
-                &mut reader,
-            )
-            .await
-            .map(Self::Row),
+            0x00 => BinaryResultsetRow::read(packet_header.payload_length as _, column_count, &mut reader)
+                .await
+                .map(Self::Row),
             _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{r1:02x}"),
+        }
+    }
+
+    /// Reads the packet
+    pub fn read_packet_sync(
+        mut reader: impl Read,
+        client_capability: CapabilityFlags,
+        column_count: usize,
+    ) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let head_byte = format::U8.read_sync(&mut reader)?;
+
+        match head_byte {
+            // treat as OK Packet for client supports DEPRECATE_EOF capability
+            0xfe if client_capability.support_deprecate_eof() => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
+            0xfe => Self::EOF_FORMAT.read_sync(reader.into_inner()),
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
+            // 0x00 is a normal resultset row in binary protocol(terminal packet is OK packet started with 0xfe)
+            0x00 => BinaryResultsetRow::read_sync(packet_header.payload_length as _, column_count, &mut reader)
+                .map(Self::Row),
+            _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{head_byte:02x}"),
         }
     }
 }

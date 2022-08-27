@@ -1,76 +1,177 @@
+//! MySQL Client/Server Protocol Implementation: https://dev.mysql.com/doc/internals/en/client-server-protocol.html
+
 use std::io::Read;
 use std::io::Write;
 
-use futures_util::{future::LocalBoxFuture, FutureExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
+use futures_util::TryFutureExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::ReadCounted;
-
-use super::PacketReader;
+use crate::counted_read::{ReadCounted, ReadCountedSync};
+use crate::DefFormatStruct;
 
 #[derive(Debug)]
+/// The header of all MySQL packets: https://dev.mysql.com/doc/internals/en/mysql-packet.html
 pub struct PacketHeader {
     pub payload_length: u32,
     pub sequence_id: u8,
 }
 impl PacketHeader {
-    pub async fn write(self, writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
-        writer
-            .write_all(&[
-                (self.payload_length & 0xff) as u8,
-                ((self.payload_length >> 8) & 0xff) as _,
-                ((self.payload_length >> 16) & 0xff) as _,
-                self.sequence_id,
-            ])
-            .await
+    /// Serializes data into bytes.
+    #[inline]
+    pub const fn serialize_bytes(&self) -> [u8; 4] {
+        [
+            (self.payload_length & 0xff) as u8,
+            ((self.payload_length >> 8) & 0xff) as _,
+            ((self.payload_length >> 16) & 0xff) as _,
+            self.sequence_id,
+        ]
     }
-}
-pub async fn write_packet(
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    payload: &[u8],
-    sequence_id: u8,
-) -> std::io::Result<()> {
-    PacketHeader {
-        payload_length: payload.len() as _,
-        sequence_id,
+
+    /// Composes data from bytes.
+    #[inline]
+    pub const fn from_fixed_bytes(bytes: [u8; 4]) -> Self {
+        Self {
+            payload_length: u32::from_le_bytes(bytes) & 0x00ff_ffff,
+            sequence_id: bytes[3],
+        }
     }
-    .write(writer)
-    .await?;
-    writer.write_all(payload).await
 }
 
-pub async fn drop_packet(reader: &mut (impl PacketReader + Unpin)) -> std::io::Result<()> {
-    let header = reader.read_packet_header().await?;
-    let mut _discard = Vec::with_capacity(header.payload_length as _);
-    unsafe {
-        _discard.set_len(header.payload_length as _);
-    }
-    reader.read_exact(&mut _discard).await?;
+/// Writes a packet(non-blocking op).
+pub async fn write_packet(
+    mut writer: impl AsyncWrite + Unpin,
+    payload: impl ClientPacket,
+    sequence_id: u8,
+) -> std::io::Result<()> {
+    let payload = payload.serialize_payload();
+
+    writer
+        .write_all(
+            &PacketHeader {
+                payload_length: payload.len() as _,
+                sequence_id,
+            }
+            .serialize_bytes(),
+        )
+        .await?;
+    writer.write_all(&payload).await
+}
+/// Writes a packet(blocking op).
+pub fn write_packet_sync(mut writer: impl Write, payload: impl ClientPacket, sequence_id: u8) -> std::io::Result<()> {
+    let payload = payload.serialize_payload();
+
+    writer.write_all(
+        &PacketHeader {
+            payload_length: payload.len() as _,
+            sequence_id,
+        }
+        .serialize_bytes(),
+    )?;
+    writer.write_all(&payload)
+}
+
+/// Drops single packet(non-blocking op).
+///
+/// This op reads a packet header, then reads its payload and discard it.
+pub async fn drop_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::Result<()> {
+    let header = format::PacketHeader.read_format(&mut reader).await?;
+    let _discard = format::Bytes(header.payload_length as _)
+        .read_format(&mut reader)
+        .await?;
+
+    Ok(())
+}
+/// Drops single packet(blocking op).
+///
+/// This op reads a packet header, then reads its payload and discard it.
+pub fn drop_packet_sync(mut reader: impl Read) -> std::io::Result<()> {
+    let header = format::PacketHeader.read_sync(&mut reader)?;
+    let _discard = format::Bytes(header.payload_length as _).read_sync(reader)?;
 
     Ok(())
 }
 
+/// The client-side packet.
 pub trait ClientPacket {
+    /// Serializes payload into bytes.
     fn serialize_payload(&self) -> Vec<u8>;
-
-    fn write_packet<'a>(
-        &'a self,
-        writer: &'a mut (impl AsyncWriteExt + Unpin),
-        sequence_id: u8,
-    ) -> LocalBoxFuture<'a, std::io::Result<()>> {
-        async move {
-            let payload = self.serialize_payload();
-
-            write_packet(writer, &payload, sequence_id).await
-        }
-        .boxed_local()
+}
+impl<T: ClientPacket + ?Sized> ClientPacket for Box<T> {
+    fn serialize_payload(&self) -> Vec<u8> {
+        T::serialize_payload(self)
     }
+}
+impl ClientPacket for [u8] {
+    fn serialize_payload(&self) -> Vec<u8> {
+        self.to_owned()
+    }
+}
+impl ClientPacket for Vec<u8> {
+    fn serialize_payload(&self) -> Vec<u8> {
+        self.to_owned()
+    }
+}
+
+/// A packet that knows how to receive it from server synchronously.
+pub trait ReceivePacket: Sized {
+    /// Read a packet from reader.
+    fn read_packet(reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self>;
+}
+/// A packet that knows how to receive it from server asynchronously.
+pub trait AsyncReceivePacket<'r, R>: Sized
+where
+    R: AsyncRead + Unpin + Send + 'r,
+{
+    /// Reading task implementation.
+    type ReceiveF: std::future::Future<Output = std::io::Result<Self>> + Send + 'r;
+
+    /// Read a packet.
+    fn read_packet_async(reader: R, client_capability: CapabilityFlags) -> Self::ReceiveF;
+}
+
+/// Client Packet(Self) - Server Packet Communication Definition.
+pub trait ClientPacketIO: ClientPacket {
+    /// Client expects this type of packet will be returned from server.
+    type Receiver: ReceivePacket;
+}
+/// Blocking communication between client and server.
+pub fn request<P: ClientPacketIO>(
+    msg: P,
+    mut stream: impl Read + Write,
+    sequence_id: u8,
+    client_capability: CapabilityFlags,
+) -> std::io::Result<P::Receiver>
+where
+    P::Receiver: ReceivePacket,
+{
+    write_packet_sync(&mut stream, msg, sequence_id)?;
+    stream.flush()?;
+    P::Receiver::read_packet(stream, client_capability)
+}
+/// Non-blocking communication between client and server.
+pub async fn request_async<'r, R, P: ClientPacketIO>(
+    msg: P,
+    mut stream: R,
+    sequence_id: u8,
+    client_capability: CapabilityFlags,
+) -> std::io::Result<P::Receiver>
+where
+    P::Receiver: AsyncReceivePacket<'r, R>,
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'r,
+{
+    write_packet(&mut stream, msg, sequence_id).await?;
+    stream.flush().await?;
+    P::Receiver::read_packet_async(stream, client_capability).await
 }
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+/// Length-Encoded Integer Format implementation: https://dev.mysql.com/doc/internals/en/integer.html#length-encoded-integer
 pub struct LengthEncodedInteger(pub u64);
 impl LengthEncodedInteger {
+    /// Calculates serialized size.
     pub fn payload_size(&self) -> usize {
         if self.0 < 251 {
             1
@@ -83,12 +184,17 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub fn read_sync(reader: &mut impl Read) -> std::io::Result<Self> {
+    /// Reads from reader(blocking).
+    pub fn read_sync(mut reader: impl Read) -> std::io::Result<Self> {
         let mut first_byte = [0u8; 1];
         reader.read_exact(&mut first_byte)?;
+        Self::read_ahead_sync(first_byte[0], reader)
+    }
 
-        match first_byte[0] {
-            x if x < 251 => Ok(Self(first_byte[0] as _)),
+    /// Reads from reader(blocking). The first byte is read externally.
+    pub fn read_ahead_sync(first_byte: u8, mut reader: impl Read) -> std::io::Result<Self> {
+        match first_byte {
+            x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => {
                 let mut value = [0u8; 2];
                 reader.read_exact(&mut value)?;
@@ -104,19 +210,18 @@ impl LengthEncodedInteger {
                 reader.read_exact(&mut value)?;
                 Ok(Self(u64::from_le_bytes(value)))
             }
-            _ => unreachable!("0x{:02x}", first_byte[0]),
+            _ => unreachable!("invalid lenenc heading: 0x{first_byte:02x}"),
         }
     }
 
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
+    /// Reads from reader(non-blocking).
+    pub async fn read(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         let first_byte = reader.read_u8().await?;
         Self::read_ahead(first_byte, reader).await
     }
 
-    pub async fn read_ahead(
-        first_byte: u8,
-        reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
-    ) -> std::io::Result<Self> {
+    /// Reads from reader(non-blocking). The first byte is read externally.
+    pub async fn read_ahead(first_byte: u8, reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => reader.read_u16_le().await.map(|x| Self(x as _)),
@@ -130,7 +235,8 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub fn write_sync(&self, writer: &mut impl Write) -> std::io::Result<()> {
+    /// Writes as bytes(non-blocking).
+    pub fn write_sync(&self, writer: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
         if self.0 < 251 {
             writer.write_all(&[self.0 as u8])
         } else if self.0 < 2u64.pow(16) {
@@ -156,7 +262,8 @@ impl LengthEncodedInteger {
         }
     }
 
-    pub async fn write(&self, writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
+    /// Writes as bytes(blocking).
+    pub async fn write(&self, writer: &mut (impl AsyncWrite + Unpin + ?Sized)) -> std::io::Result<()> {
         if self.0 < 251 {
             writer.write_u8(self.0 as _).await
         } else if self.0 < 2u64.pow(16) {
@@ -189,72 +296,107 @@ impl LengthEncodedInteger {
     }
 }
 
-pub async fn read_lenenc_str(
-    reader: &mut (impl AsyncReadExt + Unpin + ?Sized),
-) -> std::io::Result<String> {
-    let LengthEncodedInteger(len) = LengthEncodedInteger::read(reader).await?;
-    let mut buf = Vec::with_capacity(len as _);
-    unsafe {
-        buf.set_len(len as _);
-    }
-    reader.read_exact(&mut buf).await?;
-    Ok(unsafe { String::from_utf8_unchecked(buf) })
-}
-
 #[derive(Debug)]
+/// Capability dependent data in OKPacket.
 pub enum OKPacketCapabilityExtraData {
+    /// Returned data to client that supports 4.1 Protocol.
     Protocol41 {
+        /// status flags
         status_flags: StatusFlags,
+        /// number of warnings
         warnings: u16,
     },
+    /// Returned data to client that expects Status Flags in EOF Packet.
     Transactions {
+        /// status flags
         status_flags: StatusFlags,
     },
 }
+DefFormatStruct!(RawOKPacket41Ext(RawOKPacket41ExtFormat) {
+    status_flags(StatusFlags) <- format::U16.map(StatusFlags),
+    warnings(u16) <- format::U16
+});
+impl From<RawOKPacket41Ext> for OKPacketCapabilityExtraData {
+    fn from(r: RawOKPacket41Ext) -> Self {
+        Self::Protocol41 {
+            status_flags: r.status_flags,
+            warnings: r.warnings,
+        }
+    }
+}
+DefFormatStruct!(RawOKPacketTransactionsExt(RawOKPacketTransactionsExtFormat) {
+    status_flags(StatusFlags) <- format::U16.map(StatusFlags)
+});
+impl From<RawOKPacketTransactionsExt> for OKPacketCapabilityExtraData {
+    fn from(r: RawOKPacketTransactionsExt) -> Self {
+        Self::Transactions {
+            status_flags: r.status_flags,
+        }
+    }
+}
+
 #[derive(Debug)]
+/// OK_Packet: https://dev.mysql.com/doc/internals/en/packet-OK_Packet.html
 pub struct OKPacket {
+    /// Number of affected rows in last query.
     pub affected_rows: u64,
+    /// Last inserted id.
     pub last_insert_id: u64,
+    /// Capability dependent data.
     pub capability_extra: Option<OKPacketCapabilityExtraData>,
+    /// Human readable status information.
     pub info: String,
+    /// Session state info, provided only if client supports Session Tracking and server's session state has changed.
     pub session_state_changes: Option<String>,
 }
+DefFormatStruct!(RawOKPacketCommonHeader(RawOKPacketCommonHeaderFormat) {
+    affected_rows(u64) <- format::LengthEncodedInteger,
+    last_insert_id(u64) <- format::LengthEncodedInteger
+});
 impl OKPacket {
+    /// Reads a packet that is expected as OKPacket.
     pub async fn expected_read(
-        reader: &mut (impl super::PacketReader + Unpin),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let header = reader.read_u8().await?;
-        if header != 0 {
-            panic!("unexpected response packet header: 0x{header:02x}");
-        }
+        let header = format::U8.read_format(&mut reader).await?;
+        assert_eq!(header, 0x00, "unexpected response packet header");
 
-        Self::read(
-            packet_header.payload_length as _,
-            &mut reader,
-            client_capability,
-        )
-        .await
+        Self::read(packet_header.payload_length as _, &mut reader, client_capability).await
     }
 
-    pub async fn read(
-        payload_size: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+    /// Reads a packet that is expected as OKPacket.
+    pub fn expected_read_packet_sync(
+        mut reader: impl Read,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let LengthEncodedInteger(affected_rows) = LengthEncodedInteger::read(reader).await?;
-        let LengthEncodedInteger(last_insert_id) = LengthEncodedInteger::read(reader).await?;
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let header = format::U8.read_sync(&mut reader)?;
+        assert_eq!(header, 0x00, "unexpected response packet header");
+
+        Self::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+    }
+
+    /// Reads the payload(non-blocking).
+    pub async fn read(
+        payload_size: usize,
+        mut reader: &mut ReadCounted<impl AsyncRead + Send + Unpin>,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let ch = RawOKPacketCommonHeaderFormat.read_format(&mut reader).await?;
         let capability_extra = if client_capability.support_41_protocol() {
-            Some(OKPacketCapabilityExtraData::Protocol41 {
-                status_flags: StatusFlags(reader.read_u16_le().await?),
-                warnings: reader.read_u16_le().await?,
-            })
+            RawOKPacket41ExtFormat
+                .read_format(&mut reader)
+                .await
+                .map(|x| Some(x.into()))?
         } else if client_capability.support_transaction() {
-            Some(OKPacketCapabilityExtraData::Transactions {
-                status_flags: StatusFlags(reader.read_u16_le().await?),
-            })
+            RawOKPacketTransactionsExtFormat
+                .read_format(&mut reader)
+                .await
+                .map(|x| Some(x.into()))?
         } else {
             None
         };
@@ -263,216 +405,223 @@ impl OKPacket {
             | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => status_flags,
             _ => StatusFlags::new(),
         };
-        let (info, session_state_changes) = if client_capability.support_session_track() {
-            let LengthEncodedInteger(info_len) = LengthEncodedInteger::read(reader).await?;
-            let mut info_bytes = Vec::with_capacity(info_len as _);
-            unsafe {
-                info_bytes.set_len(info_len as _);
-            }
-            reader.read_exact(&mut info_bytes).await?;
-            let state_changes_bytes = if st.has_state_changed() {
-                let LengthEncodedInteger(state_info_len) =
-                    LengthEncodedInteger::read(reader).await?;
-                let mut state_info_bytes = Vec::with_capacity(state_info_len as _);
-                unsafe {
-                    state_info_bytes.set_len(state_info_len as _);
-                }
-                reader.read_exact(&mut state_info_bytes).await?;
-                Some(state_info_bytes)
+
+        let (info, session_state_changes);
+        if client_capability.support_session_track() {
+            info = format::LengthEncodedString.read_format(&mut reader).await?;
+            session_state_changes = if st.has_state_changed() {
+                format::LengthEncodedString.read_format(&mut reader).await.map(Some)?
             } else {
                 None
             };
-
-            unsafe {
-                (
-                    String::from_utf8_unchecked(info_bytes),
-                    state_changes_bytes.map(|bytes| String::from_utf8_unchecked(bytes)),
-                )
-            }
         } else {
-            let rest_length = payload_size - reader.read_bytes();
-            let mut info_bytes = Vec::with_capacity(rest_length as _);
-            unsafe {
-                info_bytes.set_len(rest_length as _);
-            }
-            reader.read_exact(&mut info_bytes).await?;
-
-            unsafe { (String::from_utf8_unchecked(info_bytes), None) }
+            info = format::FixedLengthString(payload_size - reader.read_bytes())
+                .read_format(reader)
+                .await?;
+            session_state_changes = None;
         };
 
         Ok(Self {
-            affected_rows,
-            last_insert_id,
+            affected_rows: ch.affected_rows,
+            last_insert_id: ch.last_insert_id,
             capability_extra,
             info,
             session_state_changes,
         })
     }
 
+    /// Reads the payload(blocking).
+    pub fn read_sync(
+        payload_length: usize,
+        mut reader: &mut ReadCountedSync<impl Read>,
+        client_capability: CapabilityFlags,
+    ) -> std::io::Result<Self> {
+        let ch = RawOKPacketCommonHeaderFormat.read_sync(&mut reader)?;
+
+        let capability_extra = if client_capability.support_41_protocol() {
+            RawOKPacket41ExtFormat.read_sync(&mut reader).map(|x| Some(x.into()))?
+        } else if client_capability.support_transaction() {
+            RawOKPacketTransactionsExtFormat
+                .read_sync(&mut reader)
+                .map(|x| Some(x.into()))?
+        } else {
+            None
+        };
+        let st = match capability_extra {
+            Some(OKPacketCapabilityExtraData::Protocol41 { status_flags, .. })
+            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => status_flags,
+            _ => StatusFlags::new(),
+        };
+
+        let (info, session_state_changes);
+        if client_capability.support_session_track() {
+            info = format::LengthEncodedString.read_sync(&mut reader)?;
+            session_state_changes = if st.has_state_changed() {
+                format::LengthEncodedString.read_sync(reader).map(Some)?
+            } else {
+                None
+            };
+        } else {
+            info = format::FixedLengthString(payload_length - reader.read_bytes()).read_sync(reader)?;
+            session_state_changes = None;
+        };
+
+        Ok(Self {
+            affected_rows: ch.affected_rows,
+            last_insert_id: ch.last_insert_id,
+            capability_extra,
+            info,
+            session_state_changes,
+        })
+    }
+
+    /// Status flags contained in this packet.
+    ///
+    /// Returns `None` if no status flags is contained.
     #[inline]
     pub fn status_flags(&self) -> Option<StatusFlags> {
         match self.capability_extra {
             Some(OKPacketCapabilityExtraData::Protocol41 { status_flags, .. })
-            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => {
-                Some(status_flags)
-            }
+            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => Some(status_flags),
             _ => None,
         }
     }
 }
 
 #[derive(Debug)]
+/// ERR_Packet: https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
 pub struct ErrPacket {
+    /// Error code
     pub code: u16,
+    /// SQL State bytes
     pub sql_state: Option<[u8; 5]>,
+    /// Human readable error message
     pub error_message: String,
 }
 impl ErrPacket {
+    /// Reads the payload(non-blocking)
     pub async fn read(
         payload_size: usize,
-        reader: &mut ReadCounted<impl super::PacketReader + Unpin>,
+        mut reader: &mut ReadCounted<impl AsyncRead + Send + Unpin>,
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let code = reader.read_u16_le().await?;
+        let code = format::U16.read_format(&mut reader).await?;
         let sql_state = if client_capabilities.support_41_protocol() {
-            let mut _state_marker = [0u8; 1];
-            reader.read_exact(&mut _state_marker).await?;
-            let mut sql_state = [0u8; 5];
-            reader.read_exact(&mut sql_state).await?;
-            Some(sql_state)
+            let _ = format::FixedBytes::<1>.read_format(&mut reader).await?;
+            format::FixedBytes::<5>.map(Some).read_format(&mut reader).await?
         } else {
             None
         };
-        let error_message_len = payload_size - reader.read_bytes();
-        let mut em_bytes = Vec::with_capacity(error_message_len);
-        unsafe {
-            em_bytes.set_len(error_message_len);
-        }
-        reader.read_exact(&mut em_bytes).await?;
+        let error_message = format::FixedLengthString(payload_size - reader.read_bytes())
+            .read_format(reader)
+            .await?;
 
         Ok(Self {
             code,
             sql_state,
-            error_message: unsafe { String::from_utf8_unchecked(em_bytes) },
+            error_message,
         })
     }
-}
 
-#[derive(Debug)]
-pub struct EOFPacket41 {
-    pub warnings: u16,
-    pub status_flags: StatusFlags,
-}
-impl EOFPacket41 {
-    pub async fn expected_read_packet(
-        reader: &mut (impl PacketReader + Unpin + ?Sized),
-    ) -> std::io::Result<Self> {
-        let _ = reader.read_packet_header().await?;
-        let mark = reader.read_u8().await?;
-        assert_eq!(mark, 0xfe);
-        Self::read(reader).await
-    }
-
-    pub async fn read(reader: &mut (impl AsyncReadExt + Unpin + ?Sized)) -> std::io::Result<Self> {
-        Ok(Self {
-            warnings: reader.read_u16_le().await?,
-            status_flags: StatusFlags(reader.read_u16_le().await?),
-        })
-    }
-}
-
-pub enum OKOrEOFPacket {
-    OK(OKPacket),
-    EOF41(EOFPacket41),
-    EOF,
-}
-impl OKOrEOFPacket {
-    pub fn ok(self) -> Option<OKPacket> {
-        match self {
-            Self::OK(p) => Some(p),
-            _ => None,
-        }
-    }
-}
-#[derive(Debug)]
-pub enum GenericResultPacket {
-    OK(OKPacket),
-    Err(ErrPacket),
-    EOF41(EOFPacket41),
-    EOF,
-}
-impl GenericResultPacket {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-
-        let header = reader.read_u8().await?;
-        match header {
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::OK),
-            0xfe if client_capability.support_41_protocol() => {
-                EOFPacket41::read(&mut reader).await.map(Self::EOF41)
-            }
-            0xfe => Ok(Self::EOF),
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Err),
-            _ => unreachable!("invalid generic response type"),
-        }
-    }
-
-    pub fn to_result(self) -> Result<OKOrEOFPacket, ErrPacket> {
-        match self {
-            Self::OK(o) => Ok(OKOrEOFPacket::OK(o)),
-            Self::EOF41(e) => Ok(OKOrEOFPacket::EOF41(e)),
-            Self::EOF => Ok(OKOrEOFPacket::EOF),
-            Self::Err(e) => Err(e),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct GenericOKErrPacket(Result<OKPacket, ErrPacket>, u8);
-impl GenericOKErrPacket {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
+    /// Reads the payload(blocking)
+    pub fn read_sync(
+        payload_size: usize,
+        mut reader: &mut ReadCountedSync<impl Read>,
         client_capabilities: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let first_byte = reader.read_u8().await?;
+        let code = format::U16.read_sync(&mut reader)?;
+        let sql_state = if client_capabilities.support_41_protocol() {
+            let _ = format::FixedBytes::<1>.read_sync(&mut reader)?;
+            format::FixedBytes::<5>.map(Some).read_sync(&mut reader)?
+        } else {
+            None
+        };
+        let error_message = format::FixedLengthString(payload_size - reader.read_bytes()).read_sync(reader)?;
 
-        match first_byte {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(|x| Self(Err(x), packet_header.sequence_id)),
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(|x| Self(Ok(x), packet_header.sequence_id)),
-            _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+        Ok(Self {
+            code,
+            sql_state,
+            error_message,
+        })
+    }
+}
+
+#[derive(Debug)]
+/// EOF_Packet(4.1 Protocol): https://dev.mysql.com/doc/internals/en/packet-EOF_Packet.html
+pub struct EOFPacket41 {
+    /// number of warnings
+    pub warnings: u16,
+    /// Status Flags
+    pub status_flags: StatusFlags,
+}
+DefFormatStruct!(pub RawEOFPacket41(RawEOFPacket41Format) {
+    warnings(u16) <- format::U16,
+    status_flags(StatusFlags) <- format::U16.map(StatusFlags)
+});
+impl From<RawEOFPacket41> for EOFPacket41 {
+    fn from(r: RawEOFPacket41) -> Self {
+        Self {
+            warnings: r.warnings,
+            status_flags: r.status_flags,
         }
     }
+}
+DefFormatStruct!(RawEOFPacket41ExpectHeader(RawEOFPacket41ExpectHeaderFormat) {
+    _packet_header(PacketHeader) <- format::PacketHeader,
+    _mark(u8) <- format::U8.assert_eq(0xfe)
+});
+impl EOFPacket41 {
+    /// Reads a packet that is expected as EOFPacket(non-blocking).
+    pub async fn expected_read_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::Result<Self> {
+        let _ = RawEOFPacket41ExpectHeaderFormat.read_format(&mut reader).await?;
+        EOFPacket41Format.read_format(reader).await
+    }
 
+    /// Reads a packet that is expected as EOFPacket(blocking).
+    pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
+        let _ = RawEOFPacket41ExpectHeaderFormat.read_sync(&mut reader)?;
+        EOFPacket41Format.read_sync(reader)
+    }
+}
+
+/// Format Fragment of EOFPacket41.
+pub struct EOFPacket41Format;
+impl ProtocolFormatFragment for EOFPacket41Format {
+    type Output = EOFPacket41;
+
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
+        RawEOFPacket41Format.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for EOFPacket41Format
+where
+    R: AsyncRead + Send + Unpin + 'r,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawEOFPacket41Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawEOFPacket41) -> EOFPacket41,
+    >;
+
+    fn read_format(self, reader: R) -> Self::ReaderF {
+        RawEOFPacket41Format.read_format(reader).map_ok(From::from)
+    }
+}
+
+#[derive(Debug)]
+/// OK_Packet or ERR_Packet, with sequence id.
+pub struct GenericOKErrPacket(Result<OKPacket, ErrPacket>, u8);
+impl From<(OKPacket, u8)> for GenericOKErrPacket {
+    fn from((d, sid): (OKPacket, u8)) -> Self {
+        Self(Ok(d), sid)
+    }
+}
+impl From<(ErrPacket, u8)> for GenericOKErrPacket {
+    fn from((d, sid): (ErrPacket, u8)) -> Self {
+        Self(Err(d), sid)
+    }
+}
+impl GenericOKErrPacket {
+    /// Converts into `Result`.
     #[inline]
     pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
         match self.0 {
@@ -481,10 +630,52 @@ impl GenericOKErrPacket {
         }
     }
 }
+impl ReceivePacket for GenericOKErrPacket {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let first_byte = format::U8.read_sync(&mut reader)?;
+
+        match first_byte {
+            0xff => ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|x| (x, packet_header.sequence_id).into()),
+            0x00 => OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|x| (x, packet_header.sequence_id).into()),
+            _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+        }
+    }
+}
+impl<'r, R> AsyncReceivePacket<'r, R> for GenericOKErrPacket
+where
+    R: AsyncRead + Unpin + Send + Sync + 'r,
+{
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
+
+    fn read_packet_async(mut reader: R, client_capabilities: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let first_byte = format::U8.read_format(&mut reader).await?;
+
+            match first_byte {
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
+                0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
+                _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
+            }
+        }
+        .boxed()
+    }
+}
 
 mod capabilities;
 pub use self::capabilities::*;
 mod handshake;
+use self::format::AsyncProtocolFormatFragment;
+use self::format::ProtocolFormatFragment;
 pub use self::handshake::*;
 mod status;
 pub use self::status::*;
@@ -496,3 +687,4 @@ mod binary;
 pub use self::binary::*;
 mod value;
 pub use self::value::*;
+pub mod format;

@@ -2,7 +2,8 @@ mod clear_text;
 mod secure_password;
 mod sha256;
 
-use tokio::io::AsyncWriteExt;
+use std::io::Read;
+use std::io::Write;
 
 use crate::protos::CapabilityFlags;
 use crate::protos::ClientPacket;
@@ -10,12 +11,12 @@ use crate::protos::HandshakeResponse320;
 use crate::protos::HandshakeResponse41;
 use crate::protos::OKPacket;
 use crate::CommunicationError;
-use crate::PacketReader;
 
 pub use self::clear_text::*;
 pub use self::secure_password::*;
 pub use self::sha256::*;
 
+/// Detailed connection information to perform Authentication flow
 pub struct ConnectionInfo<'s> {
     pub client_capabilities: CapabilityFlags,
     pub max_packet_size: u32,
@@ -25,15 +26,15 @@ pub struct ConnectionInfo<'s> {
     pub database: Option<&'s str>,
 }
 impl ConnectionInfo<'_> {
-    pub async fn send_handshake_response(
-        &self,
-        stream: &mut (impl AsyncWriteExt + Unpin),
-        auth_response: &[u8],
-        auth_plugin_name: Option<&str>,
-        sequence_id: u8,
-    ) -> std::io::Result<()> {
+    /// Make a handshake response with authentication responses
+    #[inline]
+    pub fn make_handshake_response<'s>(
+        &'s self,
+        auth_response: &'s [u8],
+        auth_plugin_name: Option<&'s str>,
+    ) -> Box<dyn ClientPacket + Sync + Send + 's> {
         if self.client_capabilities.support_41_protocol() {
-            HandshakeResponse41 {
+            Box::new(HandshakeResponse41 {
                 capability: self.client_capabilities,
                 max_packet_size: self.max_packet_size,
                 character_set: self.character_set,
@@ -42,31 +43,37 @@ impl ConnectionInfo<'_> {
                 database: self.database,
                 auth_plugin_name,
                 connect_attrs: Default::default(),
-            }
-            .write_packet(stream, sequence_id)
-            .await
+            })
         } else {
-            HandshakeResponse320 {
+            Box::new(HandshakeResponse320 {
                 capability: self.client_capabilities,
                 max_packet_size: self.max_packet_size,
                 username: self.username,
                 auth_response,
                 database: self.database,
-            }
-            .write_packet(stream, sequence_id)
-            .await
+            })
         }
     }
 }
 
-pub trait Authentication<'s> {
+/// An Authentication Plugin implementation
+pub trait Authentication {
+    /// Authentication Plugin name
     const NAME: &'static str;
-    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>> + 's;
 
-    fn run(
-        &'s self,
-        stream: &'s mut (impl PacketReader + AsyncWriteExt + Unpin),
-        con_info: &'s ConnectionInfo,
+    /// Run Authentication flow
+    fn run_sync(
+        &self,
+        stream: impl Read + Write,
+        con_info: &ConnectionInfo,
         first_sequence_id: u8,
-    ) -> Self::OperationF;
+    ) -> Result<(OKPacket, u8), CommunicationError>;
+}
+/// Asynchronous implementation of Authentication flow
+pub trait AsyncAuthentication<'s, S: 's + Send>: Authentication {
+    /// Future type of Authentication flow
+    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>> + Send + 's;
+
+    /// Run Authentication flow
+    fn run(&'s self, stream: S, con_info: &'s ConnectionInfo, first_sequence_id: u8) -> Self::OperationF;
 }

@@ -1,5 +1,8 @@
 use futures_util::TryStreamExt;
-use orcinus::{authentication::Authentication, protos::ClientPacket};
+use orcinus::{
+    authentication::{AsyncAuthentication, Authentication},
+    SharedMysqlClient,
+};
 use tokio::io::AsyncWriteExt;
 
 /// do not use this at other of localhost connection
@@ -16,8 +19,7 @@ impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
         _ocsp_response: &[u8],
         _now: std::time::SystemTime,
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..])
-            .expect("invalid certificate format");
+        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..]).expect("invalid certificate format");
         println!("end entity subject: {}", cert.1.subject);
         *self.mysql_pubkey_der.write() = cert.1.public_key().raw.to_owned();
 
@@ -31,7 +33,7 @@ async fn main() {
         .await
         .expect("Failed to connect");
     let mut stream = tokio::io::BufStream::new(stream);
-    let (mut sequence_id, server_handshake) = orcinus::protos::Handshake::read_packet(&mut stream)
+    let (server_handshake, mut sequence_id) = orcinus::protos::Handshake::read_packet(&mut stream)
         .await
         .expect("Failed to read initial handshake");
     println!("sequence id: {sequence_id}");
@@ -55,12 +57,15 @@ async fn main() {
     let capability = required_caps & server_caps;
 
     sequence_id += 1;
-    orcinus::protos::SSLRequest {
-        capability: required_caps & server_caps,
-        max_packet_size: 16777216,
-        character_set: 0xff,
-    }
-    .write_packet(&mut stream, sequence_id)
+    orcinus::protos::write_packet(
+        &mut stream,
+        orcinus::protos::SSLRequest {
+            capability: required_caps & server_caps,
+            max_packet_size: 16777216,
+            character_set: 0xff,
+        },
+        sequence_id,
+    )
     .await
     .expect("Failed to send ssl request");
     stream.flush().await.expect("Failed to flush stream");
@@ -102,21 +107,17 @@ async fn main() {
         orcinus::protos::Handshake::V9(ref p) => (None, p.scramble.as_bytes(), None),
     };
     let (resp, _) = match auth_plugin_name {
-        Some(x) if x == orcinus::authentication::Native41::NAME => {
-            orcinus::authentication::Native41 {
-                server_data_1: auth_data_1,
-                server_data_2: auth_data_2.expect("no extra data passed from server"),
-            }
+        Some(x) if x == orcinus::authentication::Native41::NAME => orcinus::authentication::Native41 {
+            server_data_1: auth_data_1,
+            server_data_2: auth_data_2.expect("no extra data passed from server"),
+        }
+        .run(&mut stream, &con_info, sequence_id + 1)
+        .await
+        .expect("Failed to authenticate"),
+        Some(x) if x == orcinus::authentication::ClearText::NAME => orcinus::authentication::ClearText
             .run(&mut stream, &con_info, sequence_id + 1)
             .await
-            .expect("Failed to authenticate")
-        }
-        Some(x) if x == orcinus::authentication::ClearText::NAME => {
-            orcinus::authentication::ClearText
-                .run(&mut stream, &con_info, sequence_id + 1)
-                .await
-                .expect("Failed to authenticate")
-        }
+            .expect("Failed to authenticate"),
         Some(x) if x == orcinus::authentication::SHA256::NAME => orcinus::authentication::SHA256 {
             server_spki_der: Some(&mysql_spki),
             scramble_buffer_1: auth_data_1,
@@ -147,18 +148,11 @@ async fn main() {
             .await
             .expect("Failed to send query command");
 
-        while let Some(r) = row_stream
-            .try_next()
-            .await
-            .expect("Failed to read resultset")
-        {
+        while let Some(r) = row_stream.try_next().await.expect("Failed to read resultset") {
             println!("row: {:?}", r.decompose_values().collect::<Vec<_>>());
         }
 
-        println!(
-            "enumeration end: more_result={:?}",
-            row_stream.has_more_resultset()
-        );
+        println!("enumeration end: more_result={:?}", row_stream.has_more_resultset());
     }
 
     let client = client.share();
@@ -172,7 +166,7 @@ async fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
@@ -182,17 +176,9 @@ async fn main() {
             .binary_resultset_stream(column_count as _)
             .await
             .expect("Failed to load resultset heading columns");
-        let column_types = unsafe {
-            resultset_stream
-                .column_types_unchecked()
-                .collect::<Vec<_>>()
-        };
+        let column_types = unsafe { resultset_stream.column_types_unchecked().collect::<Vec<_>>() };
 
-        while let Some(r) = resultset_stream
-            .try_next()
-            .await
-            .expect("Failed to read resultset")
-        {
+        while let Some(r) = resultset_stream.try_next().await.expect("Failed to read resultset") {
             let values = r
                 .decode_values(&column_types)
                 .collect::<Result<Vec<_>, _>>()
@@ -207,9 +193,5 @@ async fn main() {
     }
 
     stmt.close().await.expect("Failed to close stmt");
-    client
-        .unshare()
-        .quit()
-        .await
-        .expect("Failed to quit client");
+    client.unshare().quit().await.expect("Failed to quit client");
 }

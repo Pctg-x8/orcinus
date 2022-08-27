@@ -1,171 +1,311 @@
 use std::collections::HashMap;
+use std::io::Read;
 
-use tokio::io::AsyncReadExt;
+use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, TryFutureExt};
+use tokio::io::AsyncRead;
 
-use crate::ReadCounted;
+use crate::counted_read::{ReadCounted, ReadCountedSync};
+use crate::protos::format;
+use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
+use crate::{DefFormatStruct, ReadAsync, ReadSync};
 
-use super::super::PacketReader;
 use super::capabilities::CapabilityFlags;
-use super::{ErrPacket, LengthEncodedInteger, OKPacket};
+use super::{AsyncReceivePacket, ClientPacketIO, ErrPacket, LengthEncodedInteger, ReceivePacket};
 
 #[derive(Debug)]
+/// Handshake V10(least common payload): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV10Short {
+    /// Human readable server version text
     pub server_version: String,
+    /// Connection ID
     pub connection_id: u32,
+    /// Data for Authentication Plugin(first 8 bytes)
     pub auth_plugin_data_part_1: [u8; 8],
+    /// Server capability flags
     pub capability_flags: CapabilityFlags,
 }
+DefFormatStruct!(pub RawHandshakeV10Short(RawHandshakeV10ShortProtocolFormat) {
+    server_version(String) <- format::NullTerminatedString,
+    connection_id(u32) <- format::U32,
+    auth_plugin_data_part_1([u8; 8]) <- format::FixedBytes::<8>,
+    _filler([u8; 1]) <- format::FixedBytes::<1>,
+    capability_flags(CapabilityFlags) <- format::U16.map(CapabilityFlags::from_lower_bits)
+});
+impl From<RawHandshakeV10Short> for HandshakeV10Short {
+    fn from(raw: RawHandshakeV10Short) -> Self {
+        Self {
+            server_version: raw.server_version,
+            connection_id: raw.connection_id,
+            auth_plugin_data_part_1: raw.auth_plugin_data_part_1,
+            capability_flags: raw.capability_flags,
+        }
+    }
+}
+
+/// Format Fragment for `HandshakeV10Short`
+pub struct HandshakeV10ShortFormat;
+impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
+    type Output = HandshakeV10Short;
+
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
+        RawHandshakeV10ShortProtocolFormat.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV10ShortFormat {
+    type ReaderF = futures_util::future::MapOk<
+        <RawHandshakeV10ShortProtocolFormat as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawHandshakeV10Short) -> HandshakeV10Short,
+    >;
+
+    fn read_format(self, reader: R) -> Self::ReaderF {
+        RawHandshakeV10ShortProtocolFormat
+            .read_format(reader)
+            .map_ok(From::from)
+    }
+}
+
 #[derive(Debug)]
+/// Handshake V10(fullset): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV10Long {
+    /// Common part of the payload
     pub short: HandshakeV10Short,
+    /// Character Set byte
     pub character_set: u8,
+    /// Status Flags
     pub status_flags: u16,
+    /// Data for Authentication Plugin(more than first 8 bytes)
     pub auth_plugin_data_part_2: Option<Vec<u8>>,
+    /// Authentication Plugin name requested by server
     pub auth_plugin_name: Option<String>,
 }
+DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
+    character_set(u8) <- format::U8,
+    status_flags(u16) <- format::U16,
+    capability_flags_upper_bits(u16) <- format::U16,
+    auth_plugin_data_length(u8) <- format::U8,
+    _filler([u8; 10]) <- format::FixedBytes::<10>
+});
+impl HandshakeV10Long {
+    /// Read additional portion from the payload
+    pub async fn read_additional(
+        short: HandshakeV10Short,
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
+    ) -> std::io::Result<Self> {
+        let head = RawHandshakeV10ExtHeadProtocolFormat.read_format(&mut reader).await?;
+        let capability_flags = short
+            .capability_flags
+            .combine_upper_bytes(head.capability_flags_upper_bits);
+
+        let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
+            format::Bytes(13.max(head.auth_plugin_data_length - 8) as _)
+                .read_format(&mut reader)
+                .await
+                .map(Some)?
+        } else {
+            None
+        };
+        let auth_plugin_name = if capability_flags.support_plugin_auth() {
+            format::NullTerminatedString.read_format(&mut reader).await.map(Some)?
+        } else {
+            None
+        };
+
+        Ok(Self {
+            short: HandshakeV10Short {
+                capability_flags,
+                ..short
+            },
+            character_set: head.character_set,
+            status_flags: head.status_flags,
+            auth_plugin_data_part_2,
+            auth_plugin_name,
+        })
+    }
+
+    /// Read additional portion from the payload
+    pub fn read_additional_sync(short: HandshakeV10Short, mut reader: impl Read) -> std::io::Result<Self> {
+        let head = RawHandshakeV10ExtHeadProtocolFormat.read_sync(&mut reader)?;
+        let capability_flags = short
+            .capability_flags
+            .combine_upper_bytes(head.capability_flags_upper_bits);
+
+        let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
+            format::Bytes(13.max(head.auth_plugin_data_length - 8) as _)
+                .read_sync(&mut reader)
+                .map(Some)?
+        } else {
+            None
+        };
+        let auth_plugin_name = if capability_flags.support_plugin_auth() {
+            format::NullTerminatedString.read_sync(reader).map(Some)?
+        } else {
+            None
+        };
+
+        Ok(Self {
+            short: HandshakeV10Short {
+                capability_flags,
+                ..short
+            },
+            character_set: head.character_set,
+            status_flags: head.status_flags,
+            auth_plugin_data_part_2,
+            auth_plugin_name,
+        })
+    }
+}
+
 #[derive(Debug)]
+/// Handshake V9(old protocol): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV9 {
+    /// Human readable server version text
     pub server_version: String,
+    /// Connection ID
     pub connection_id: u32,
+    /// Scramble data for authentication
     pub scramble: String,
 }
+DefFormatStruct!(pub RawHandshakeV9(RawHandshakeV9Format) {
+    server_version(String) <- format::NullTerminatedString,
+    connection_id(u32) <- format::U32,
+    scramble(String) <- format::NullTerminatedString
+});
+impl From<RawHandshakeV9> for HandshakeV9 {
+    fn from(r: RawHandshakeV9) -> Self {
+        Self {
+            server_version: r.server_version,
+            connection_id: r.connection_id,
+            scramble: r.scramble,
+        }
+    }
+}
+
+/// Format Fragment for `HandshakeV9`
+pub struct HandshakeV9Format;
+impl format::ProtocolFormatFragment for HandshakeV9Format {
+    type Output = HandshakeV9;
+
+    fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
+        RawHandshakeV9Format.read_sync(reader).map(From::from)
+    }
+}
+impl<'r, R: 'r> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV9Format
+where
+    R: AsyncRead + Send + Unpin,
+{
+    type ReaderF = futures_util::future::MapOk<
+        <RawHandshakeV9Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
+        fn(RawHandshakeV9) -> HandshakeV9,
+    >;
+
+    fn read_format(self, reader: R) -> Self::ReaderF {
+        RawHandshakeV9Format.read_format(reader).map_ok(From::from)
+    }
+}
+
 #[derive(Debug)]
+/// Handshake Packet from Server: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub enum Handshake {
     V9(HandshakeV9),
     V10Short(HandshakeV10Short),
     V10Long(HandshakeV10Long),
 }
 impl Handshake {
+    /// Reads a packet. Returned value is with sequence_id.
     pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
-    ) -> std::io::Result<(u8, Self)> {
-        let packet_header = reader.read_packet_header().await?;
-        let protocol_version = reader.read_u8().await?;
+        mut reader: &mut (impl AsyncRead + Unpin + Sync + Send + ?Sized),
+    ) -> std::io::Result<(Self, u8)> {
+        ReadAsync!(reader => {
+            packet_header <- format::PacketHeader,
+            protocol_version <- format::U8
+        });
 
-        let decoded_payload = if protocol_version == 9 {
-            Self::V9(HandshakeV9 {
-                server_version: reader.read_null_terminated_string().await?,
-                connection_id: reader.read_u32_le().await?,
-                scramble: reader.read_null_terminated_string().await?,
-            })
-        } else if protocol_version == 10 {
-            let mut reader = ReadCounted::new(reader);
-            let server_version = reader.read_null_terminated_string().await?;
-            let connection_id = reader.read_u32_le().await?;
-            let mut auth_plugin_data_part_1 = [0u8; 8];
-            reader.read_exact(&mut auth_plugin_data_part_1).await?;
-            let mut _filler = [0u8; 1];
-            reader.read_exact(&mut _filler).await?;
-            let capability_flags = CapabilityFlags::read_lower_bits(&mut reader).await?;
+        let decoded_payload = match protocol_version {
+            9 => HandshakeV9Format.read_format(reader).await.map(Self::V9)?,
+            10 => {
+                let mut reader = ReadCounted::new(reader);
+                let short = HandshakeV10ShortFormat.read_format(&mut reader).await?;
 
-            if packet_header.payload_length as usize > reader.read_bytes() {
-                // more data available
-                let character_set = reader.read_u8().await?;
-                let status_flags = reader.read_u16_le().await?;
-                let capability_flags = capability_flags
-                    .additional_read_upper_bits(&mut reader)
-                    .await?;
-                let auth_plugin_data_length = reader.read_u8().await?;
-                let mut _filler = [0u8; 10];
-                reader.read_exact(&mut _filler).await?;
-                let auth_plugin_data_part_2 = if capability_flags.support_secure_connection() {
-                    let mut data = vec![0u8; 13.max(auth_plugin_data_length - 8) as _];
-                    reader.read_exact(&mut data).await?;
-                    Some(data)
+                if packet_header.payload_length as usize > reader.read_bytes() {
+                    // more data available
+                    HandshakeV10Long::read_additional(short, reader.into_inner())
+                        .await
+                        .map(Self::V10Long)?
                 } else {
-                    None
-                };
-                let auth_plugin_name = if capability_flags.support_plugin_auth() {
-                    Some(reader.read_null_terminated_string().await?)
-                } else {
-                    None
-                };
-
-                Self::V10Long(HandshakeV10Long {
-                    short: HandshakeV10Short {
-                        server_version,
-                        connection_id,
-                        auth_plugin_data_part_1,
-                        capability_flags,
-                    },
-                    character_set,
-                    status_flags,
-                    auth_plugin_data_part_2,
-                    auth_plugin_name,
-                })
-            } else {
-                Self::V10Short(HandshakeV10Short {
-                    server_version,
-                    connection_id,
-                    auth_plugin_data_part_1,
-                    capability_flags,
-                })
+                    Self::V10Short(short)
+                }
             }
-        } else {
-            unreachable!("invalid protocol version: {protocol_version}");
+            _ => unreachable!("unsupported protocol version: {protocol_version}"),
         };
 
-        Ok((packet_header.sequence_id, decoded_payload))
+        Ok((decoded_payload, packet_header.sequence_id))
+    }
+
+    /// Reads a packet. Returned value is with sequence_id.
+    pub fn read_packet_sync(mut reader: impl Read) -> std::io::Result<(Self, u8)> {
+        ReadSync!(reader => {
+            packet_header <- format::PacketHeader,
+            protocol_version <- format::U8
+        });
+
+        let decoded_payload = match protocol_version {
+            9 => HandshakeV9Format.read_sync(reader).map(Self::V9)?,
+            10 => {
+                let mut reader = ReadCountedSync::new(reader);
+                let short = HandshakeV10ShortFormat.read_sync(&mut reader)?;
+
+                if packet_header.payload_length as usize > reader.read_bytes() {
+                    // more data available
+                    HandshakeV10Long::read_additional_sync(short, reader.into_inner()).map(Self::V10Long)?
+                } else {
+                    Self::V10Short(short)
+                }
+            }
+            _ => unreachable!("unsupported protocol version: {protocol_version}"),
+        };
+
+        Ok((decoded_payload, packet_header.sequence_id))
     }
 }
 
-pub enum HandshakeResponse41AuthResponse<'s> {
-    PluginAuthLenEnc(&'s [u8]),
-    SecureConnection(&'s [u8]),
-    Plain(&'s [u8]),
-}
+/// Handshake Response(new): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse41
 pub struct HandshakeResponse41<'s> {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Character set expected by client
     pub character_set: u8,
+    /// Login user name
     pub username: &'s str,
+    /// Response bytes by Authentication Plugin
     pub auth_response: &'s [u8],
+    /// Initially selected database name
     pub database: Option<&'s str>,
+    /// Used Authentication Plugin name
     pub auth_plugin_name: Option<&'s str>,
+    /// Connection Attributes
     pub connect_attrs: HashMap<&'s str, &'s str>,
-}
-impl HandshakeResponse41<'_> {
-    pub fn compute_final_capability_flags(&self) -> CapabilityFlags {
-        let mut caps = self.capability;
-        caps.set_support_41_protocol();
-        if self.database.is_some() {
-            caps.set_connect_with_db();
-        } else {
-            caps.clear_connect_with_db();
-        }
-        if self.auth_plugin_name.is_some() {
-            caps.set_client_plugin_auth();
-        } else {
-            caps.clear_plugin_auth();
-        }
-        if !self.connect_attrs.is_empty() {
-            caps.set_client_connect_attrs();
-        } else {
-            caps.clear_client_connect_attrs();
-        }
-
-        caps
-    }
 }
 impl super::ClientPacket for HandshakeResponse41<'_> {
     fn serialize_payload(&self) -> Vec<u8> {
         let mut sink = Vec::with_capacity(128);
 
-        let caps = self.compute_final_capability_flags();
-        sink.extend(u32::to_le_bytes(caps.0));
+        sink.extend(u32::to_le_bytes(self.capability.0));
         sink.extend(u32::to_le_bytes(self.max_packet_size));
         sink.push(self.character_set);
         sink.extend(std::iter::repeat(0).take(23));
         sink.extend(self.username.as_bytes());
         sink.push(0);
-        if caps.support_plugin_auth_lenenc_client_data() {
+        if self.capability.support_plugin_auth_lenenc_client_data() {
             unsafe {
                 LengthEncodedInteger(self.auth_response.len() as _)
                     .write_sync(&mut sink)
                     .unwrap_unchecked()
             };
             sink.extend(self.auth_response);
-        } else if caps.support_secure_connection() {
+        } else if self.capability.support_secure_connection() {
             sink.push(self.auth_response.len() as u8);
             sink.extend(self.auth_response);
         } else {
@@ -221,31 +361,24 @@ impl super::ClientPacket for HandshakeResponse41<'_> {
     }
 }
 
+/// Handshake Response(old): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse320
 pub struct HandshakeResponse320<'s> {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Login user name
     pub username: &'s str,
+    /// Response bytes from Authentication method
     pub auth_response: &'s [u8],
+    /// Initially selected database name
     pub database: Option<&'s str>,
-}
-impl HandshakeResponse320<'_> {
-    pub fn compute_final_capability_flags(&self) -> CapabilityFlags {
-        let mut caps = self.capability;
-        if self.database.is_some() {
-            caps.set_connect_with_db();
-        } else {
-            caps.clear_connect_with_db();
-        }
-
-        caps
-    }
 }
 impl super::ClientPacket for HandshakeResponse320<'_> {
     fn serialize_payload(&self) -> Vec<u8> {
         let mut sink = Vec::with_capacity(48);
 
-        let caps = self.compute_final_capability_flags();
-        sink.extend(u16::to_le_bytes(caps.0 as _));
+        sink.extend(u16::to_le_bytes(self.capability.0 as _));
         sink.extend(&u32::to_le_bytes(self.max_packet_size)[0..3]);
         sink.extend(self.username.as_bytes());
         sink.push(0);
@@ -260,9 +393,13 @@ impl super::ClientPacket for HandshakeResponse320<'_> {
     }
 }
 
+/// SSL Connection Request: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::SSLRequest
 pub struct SSLRequest {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Character set expected by client
     pub character_set: u8,
 }
 impl super::ClientPacket for SSLRequest {
@@ -278,108 +415,126 @@ impl super::ClientPacket for SSLRequest {
     }
 }
 
+/// Request for "public key retrieval" in sha2 authentication: https://dev.mysql.com/doc/internals/en/public-key-retrieval.html
 pub struct PublicKeyRequest;
 impl super::ClientPacket for PublicKeyRequest {
     fn serialize_payload(&self) -> Vec<u8> {
+        // note: ドキュメントだと0x01だったけどソースコード見たら0x02で、こっちが正解らしい
         vec![0x02]
     }
 }
+impl ClientPacketIO for PublicKeyRequest {
+    type Receiver = AuthMoreDataResponse;
+}
 
+/// More data sent from server while authentication flow: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::AuthMoreData
 #[repr(transparent)]
 pub struct AuthMoreData(pub Vec<u8>);
 impl AuthMoreData {
+    #[inline]
+    const fn format(required_length: usize) -> format::Mapped<format::Bytes, fn(Vec<u8>) -> AuthMoreData> {
+        format::Mapped(format::Bytes(required_length), AuthMoreData)
+    }
+
+    /// Reads a packet that is expected as AuthMoreData packet
     pub async fn expacted_read_packet(
-        reader: &mut (impl PacketReader + Unpin),
+        mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
+        let packet_header = format::PacketHeader.read_format(&mut reader).await?;
         let mut reader = ReadCounted::new(reader);
-        let heading = reader.read_u8().await?;
-        assert_eq!(heading, 0x01);
+        let heading = format::U8.read_format(&mut reader).await?;
+        assert_eq!(heading, 0x01, "invalid AuthMoreData packet");
 
         Self::read(packet_header.payload_length as _, &mut reader).await
     }
 
+    /// Reads a packet that is expected as AuthMoreData packet
+    pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let heading = format::U8.read_sync(&mut reader)?;
+        assert_eq!(heading, 0x01, "invalid AuthMoreData packet");
+
+        Self::read_sync(packet_header.payload_length as _, &mut reader)
+    }
+
+    /// Reads the payload
     pub async fn read(
         payload_length: usize,
-        reader: &mut ReadCounted<impl AsyncReadExt + Unpin>,
+        reader: &mut ReadCounted<impl AsyncRead + Sync + Send + Unpin>,
     ) -> std::io::Result<Self> {
-        let mut content = Vec::with_capacity(payload_length - reader.read_bytes());
-        unsafe {
-            content.set_len(payload_length - reader.read_bytes());
-        }
-        reader.read_exact(&mut content).await?;
-        Ok(Self(content))
+        Self::format(payload_length - reader.read_bytes())
+            .read_format(reader)
+            .await
+    }
+
+    /// Reads the payload
+    pub fn read_sync(payload_length: usize, reader: &mut ReadCountedSync<impl Read>) -> std::io::Result<Self> {
+        Self::format(payload_length - reader.read_bytes()).read_sync(reader)
     }
 }
 
+/// AuthMoreData or ERR_Packet
 pub struct AuthMoreDataResponse(Result<AuthMoreData, ErrPacket>, u8);
-impl AuthMoreDataResponse {
-    pub async fn read_packet(
-        reader: &mut (impl PacketReader + Unpin),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let heading = reader.read_u8().await?;
-
-        match heading {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(|e| Self(Err(e), packet_header.sequence_id)),
-            0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
-                .await
-                .map(|x| Self(Ok(x), packet_header.sequence_id)),
-            _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
-        }
+impl From<(AuthMoreData, u8)> for AuthMoreDataResponse {
+    fn from((d, sid): (AuthMoreData, u8)) -> Self {
+        Self(Ok(d), sid)
     }
-
+}
+impl From<(ErrPacket, u8)> for AuthMoreDataResponse {
+    fn from((d, sid): (ErrPacket, u8)) -> Self {
+        Self(Err(d), sid)
+    }
+}
+impl AuthMoreDataResponse {
+    /// Converts into `Result`.
     #[inline]
     pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
         self.0.map(|x| (x, self.1))
     }
 }
+impl ReceivePacket for AuthMoreDataResponse {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
+        let packet_header = format::PacketHeader.read_sync(&mut reader)?;
+        let mut reader = ReadCountedSync::new(reader);
+        let heading = format::U8.read_sync(&mut reader)?;
 
-pub enum HandshakeResult {
-    Ok(OKPacket),
-    Err(ErrPacket),
-}
-impl HandshakeResult {
-    pub async fn read_packet(
-        reader: &mut (impl AsyncReadExt + Unpin),
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        let packet_header = reader.read_packet_header().await?;
-        let mut reader = ReadCounted::new(reader);
-        let head_byte = reader.read_u8().await?;
-
-        match head_byte {
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Err),
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .await
-            .map(Self::Ok),
-            _ => unreachable!("unexpected handshake result payload header: 0x{head_byte:02x}"),
-        }
-    }
-
-    #[inline]
-    pub fn into_result(self) -> Result<OKPacket, ErrPacket> {
-        match self {
-            Self::Ok(o) => Ok(o),
-            Self::Err(e) => Err(e),
+        match heading {
+            0xff => ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|e| (e, packet_header.sequence_id).into()),
+            0x01 => AuthMoreData::read_sync(packet_header.payload_length as _, &mut reader)
+                .map(|x| (x, packet_header.sequence_id).into()),
+            _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
         }
     }
 }
+impl<'r, R> AsyncReceivePacket<'r, R> for AuthMoreDataResponse
+where
+    R: AsyncRead + Unpin + Send + Sync + 'r,
+{
+    type ReceiveF = BoxFuture<'r, std::io::Result<Self>>;
+
+    fn read_packet_async(mut reader: R, client_capability: CapabilityFlags) -> Self::ReceiveF {
+        async move {
+            let packet_header = format::PacketHeader.read_format(&mut reader).await?;
+            let mut reader = ReadCounted::new(reader);
+            let heading = format::U8.read_format(&mut reader).await?;
+
+            match heading {
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capability)
+                    .await
+                    .map(|e| (e, packet_header.sequence_id).into()),
+                0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
+                _ => {
+                    unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}")
+                }
+            }
+        }
+        .boxed()
+    }
+}
+
+/// Final packet of Handshake flow
+pub type HandshakeResult = super::GenericOKErrPacket;
