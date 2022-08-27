@@ -4,13 +4,14 @@ use futures_util::{future::BoxFuture, FutureExt};
 use tokio::io::AsyncRead;
 
 use crate::{
+    counted_read::{ReadCounted, ReadCountedSync},
     protos::{
         format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
         AsyncReceivePacket, CapabilityFlags, ClientPacket, ClientPacketIO, ColumnType, EOFPacket41,
         EOFPacket41Format, ErrPacket, InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
         PacketHeader, ReceivePacket,
     },
-    DefFormatStruct, ReadCounted, ReadCountedSync,
+    DefFormatStruct,
 };
 
 pub struct QueryCommand<'s>(pub &'s str);

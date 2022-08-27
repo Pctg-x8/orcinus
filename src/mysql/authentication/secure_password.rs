@@ -10,6 +10,7 @@ use crate::{
     CommunicationError,
 };
 
+/// Generates an auth_response for `"mysql_native_password"` authentication plugin
 pub fn gen_secure_password_auth_response(password: &str, salt1: &[u8], salt2: &[u8]) -> Vec<u8> {
     let password_sha1 = digest(&SHA1, password.as_bytes());
     let mut concat_data = Vec::with_capacity(40);
@@ -25,8 +26,11 @@ pub fn gen_secure_password_auth_response(password: &str, salt1: &[u8], salt2: &[
         .collect()
 }
 
+/// Protocol 4.1 Native Authentication(`"mysql_native_password"`)
 pub struct Native41<'s> {
+    /// first 8 bytes in handshake request
     pub server_data_1: &'s [u8],
+    /// rest bytes in handshake request
     pub server_data_2: &'s [u8],
 }
 impl super::Authentication for Native41<'_> {

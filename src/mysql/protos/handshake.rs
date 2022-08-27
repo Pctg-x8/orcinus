@@ -5,18 +5,24 @@ use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, TryFutureExt};
 use tokio::io::AsyncRead;
 
+use crate::counted_read::{ReadCounted, ReadCountedSync};
+use crate::protos::format;
 use crate::protos::format::{AsyncProtocolFormatFragment, ProtocolFormatFragment};
-use crate::{protos::format, ReadCounted};
-use crate::{DefFormatStruct, ReadAsync, ReadCountedSync, ReadSync};
+use crate::{DefFormatStruct, ReadAsync, ReadSync};
 
 use super::capabilities::CapabilityFlags;
 use super::{AsyncReceivePacket, ClientPacketIO, ErrPacket, LengthEncodedInteger, ReceivePacket};
 
 #[derive(Debug)]
+/// Handshake V10(least common payload): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV10Short {
+    /// Human readable server version text
     pub server_version: String,
+    /// Connection ID
     pub connection_id: u32,
+    /// Data for Authentication Plugin(first 8 bytes)
     pub auth_plugin_data_part_1: [u8; 8],
+    /// Server capability flags
     pub capability_flags: CapabilityFlags,
 }
 DefFormatStruct!(pub RawHandshakeV10Short(RawHandshakeV10ShortProtocolFormat) {
@@ -37,6 +43,7 @@ impl From<RawHandshakeV10Short> for HandshakeV10Short {
     }
 }
 
+/// Format Fragment for `HandshakeV10Short`
 pub struct HandshakeV10ShortFormat;
 impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
     type Output = HandshakeV10Short;
@@ -63,11 +70,17 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'
 }
 
 #[derive(Debug)]
+/// Handshake V10(fullset): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV10Long {
+    /// Common part of the payload
     pub short: HandshakeV10Short,
+    /// Character Set byte
     pub character_set: u8,
+    /// Status Flags
     pub status_flags: u16,
+    /// Data for Authentication Plugin(more than first 8 bytes)
     pub auth_plugin_data_part_2: Option<Vec<u8>>,
+    /// Authentication Plugin name requested by server
     pub auth_plugin_name: Option<String>,
 }
 DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
@@ -78,6 +91,7 @@ DefFormatStruct!(RawHandshakeV10ExtHead(RawHandshakeV10ExtHeadProtocolFormat) {
     _filler([u8; 10]) <- format::FixedBytes::<10>
 });
 impl HandshakeV10Long {
+    /// Read additional portion from the payload
     pub async fn read_additional(
         short: HandshakeV10Short,
         mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
@@ -118,6 +132,7 @@ impl HandshakeV10Long {
         })
     }
 
+    /// Read additional portion from the payload
     pub fn read_additional_sync(
         short: HandshakeV10Short,
         mut reader: impl Read,
@@ -154,9 +169,13 @@ impl HandshakeV10Long {
 }
 
 #[derive(Debug)]
+/// Handshake V9(old protocol): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub struct HandshakeV9 {
+    /// Human readable server version text
     pub server_version: String,
+    /// Connection ID
     pub connection_id: u32,
+    /// Scramble data for authentication
     pub scramble: String,
 }
 DefFormatStruct!(pub RawHandshakeV9(RawHandshakeV9Format) {
@@ -174,6 +193,7 @@ impl From<RawHandshakeV9> for HandshakeV9 {
     }
 }
 
+/// Format Fragment for `HandshakeV9`
 pub struct HandshakeV9Format;
 impl format::ProtocolFormatFragment for HandshakeV9Format {
     type Output = HandshakeV9;
@@ -197,12 +217,14 @@ where
 }
 
 #[derive(Debug)]
+/// Handshake Packet from Server: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
 pub enum Handshake {
     V9(HandshakeV9),
     V10Short(HandshakeV10Short),
     V10Long(HandshakeV10Long),
 }
 impl Handshake {
+    /// Reads a packet. Returned value is with sequence_id.
     pub async fn read_packet(
         mut reader: &mut (impl AsyncRead + Unpin + Sync + Send + ?Sized),
     ) -> std::io::Result<(Self, u8)> {
@@ -232,6 +254,7 @@ impl Handshake {
         Ok((decoded_payload, packet_header.sequence_id))
     }
 
+    /// Reads a packet. Returned value is with sequence_id.
     pub fn read_packet_sync(mut reader: impl Read) -> std::io::Result<(Self, u8)> {
         ReadSync!(reader => {
             packet_header <- format::PacketHeader,
@@ -259,19 +282,23 @@ impl Handshake {
     }
 }
 
-pub enum HandshakeResponse41AuthResponse<'s> {
-    PluginAuthLenEnc(&'s [u8]),
-    SecureConnection(&'s [u8]),
-    Plain(&'s [u8]),
-}
+/// Handshake Response(new): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse41
 pub struct HandshakeResponse41<'s> {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Character set expected by client
     pub character_set: u8,
+    /// Login user name
     pub username: &'s str,
+    /// Response bytes by Authentication Plugin
     pub auth_response: &'s [u8],
+    /// Initially selected database name
     pub database: Option<&'s str>,
+    /// Used Authentication Plugin name
     pub auth_plugin_name: Option<&'s str>,
+    /// Connection Attributes
     pub connect_attrs: HashMap<&'s str, &'s str>,
 }
 impl super::ClientPacket for HandshakeResponse41<'_> {
@@ -347,11 +374,17 @@ impl super::ClientPacket for HandshakeResponse41<'_> {
     }
 }
 
+/// Handshake Response(old): https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse320
 pub struct HandshakeResponse320<'s> {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Login user name
     pub username: &'s str,
+    /// Response bytes from Authentication method
     pub auth_response: &'s [u8],
+    /// Initially selected database name
     pub database: Option<&'s str>,
 }
 impl super::ClientPacket for HandshakeResponse320<'_> {
@@ -373,9 +406,13 @@ impl super::ClientPacket for HandshakeResponse320<'_> {
     }
 }
 
+/// SSL Connection Request: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::SSLRequest
 pub struct SSLRequest {
+    /// Client-side capability flags
     pub capability: CapabilityFlags,
+    /// Maximum packet size
     pub max_packet_size: u32,
+    /// Character set expected by client
     pub character_set: u8,
 }
 impl super::ClientPacket for SSLRequest {
@@ -391,6 +428,7 @@ impl super::ClientPacket for SSLRequest {
     }
 }
 
+/// Request for "public key retrieval" in sha2 authentication: https://dev.mysql.com/doc/internals/en/public-key-retrieval.html
 pub struct PublicKeyRequest;
 impl super::ClientPacket for PublicKeyRequest {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -402,6 +440,7 @@ impl ClientPacketIO for PublicKeyRequest {
     type Receiver = AuthMoreDataResponse;
 }
 
+/// More data sent from server while authentication flow: https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::AuthMoreData
 #[repr(transparent)]
 pub struct AuthMoreData(pub Vec<u8>);
 impl AuthMoreData {
@@ -412,6 +451,7 @@ impl AuthMoreData {
         format::Mapped(format::Bytes(required_length), AuthMoreData)
     }
 
+    /// Reads a packet that is expected as AuthMoreData packet
     pub async fn expacted_read_packet(
         mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
@@ -423,6 +463,7 @@ impl AuthMoreData {
         Self::read(packet_header.payload_length as _, &mut reader).await
     }
 
+    /// Reads a packet that is expected as AuthMoreData packet
     pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
@@ -432,6 +473,7 @@ impl AuthMoreData {
         Self::read_sync(packet_header.payload_length as _, &mut reader)
     }
 
+    /// Reads the payload
     pub async fn read(
         payload_length: usize,
         reader: &mut ReadCounted<impl AsyncRead + Sync + Send + Unpin>,
@@ -441,6 +483,7 @@ impl AuthMoreData {
             .await
     }
 
+    /// Reads the payload
     pub fn read_sync(
         payload_length: usize,
         reader: &mut ReadCountedSync<impl Read>,
@@ -449,6 +492,7 @@ impl AuthMoreData {
     }
 }
 
+/// AuthMoreData or ERR_Packet
 pub struct AuthMoreDataResponse(Result<AuthMoreData, ErrPacket>, u8);
 impl From<(AuthMoreData, u8)> for AuthMoreDataResponse {
     fn from((d, sid): (AuthMoreData, u8)) -> Self {
@@ -461,6 +505,7 @@ impl From<(ErrPacket, u8)> for AuthMoreDataResponse {
     }
 }
 impl AuthMoreDataResponse {
+    /// Converts into `Result`.
     #[inline]
     pub fn into_result(self) -> Result<(AuthMoreData, u8), ErrPacket> {
         self.0.map(|x| (x, self.1))
@@ -520,4 +565,5 @@ where
     }
 }
 
+/// Final packet of Handshake flow
 pub type HandshakeResult = super::GenericOKErrPacket;

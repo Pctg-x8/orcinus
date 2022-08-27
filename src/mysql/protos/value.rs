@@ -2,6 +2,7 @@ use super::binary;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
+/// A Column Type byte: https://dev.mysql.com/doc/internals/en/com-query-response.html#column-type
 pub enum ColumnType {
     Decimal = 0x00,
     Tiny = 0x01,
@@ -35,11 +36,16 @@ pub enum ColumnType {
     Geometry = 0xff,
 }
 impl ColumnType {
-    /// this function does not check whether the passed value is valid ColumnType value.
+    /// Converts from raw byte value
+    ///
+    /// this function does not check whether the passed value is valid `ColumnType` value.
     pub unsafe fn from_u8_unchecked(value: u8) -> Self {
         std::mem::transmute(value)
     }
 
+    /// Slices a value from preloaded binary row
+    ///
+    /// This operation is less-copy(taking references for `ByteString`-encoded types)
     pub fn slice_value<'s>(
         &self,
         reader: &mut std::io::Cursor<&'s [u8]>,
@@ -102,6 +108,7 @@ impl TryFrom<u8> for ColumnType {
 }
 
 #[derive(Debug)]
+/// A value in resultset/sql
 pub enum Value<'s> {
     String(&'s str),
     Varchar(&'s str),

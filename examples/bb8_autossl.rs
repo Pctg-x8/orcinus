@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+use orcinus::SharedMysqlClient;
 
 /// do not use this at other of localhost connection
 pub struct MysqlCertForceVerifier;
@@ -64,7 +65,7 @@ async fn main() {
         );
     }
 
-    let client = orcinus::bb8::SharedPooledClient::share_from(client);
+    let client = orcinus::SharedClient::share_from(client);
     let mut stmt = client
         .prepare("Select * from test_data where id=?")
         .await
@@ -75,7 +76,7 @@ async fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
@@ -110,5 +111,9 @@ async fn main() {
     }
 
     stmt.close().await.expect("Failed to close statement");
-    client.unshare().quit().await.expect("Failed to quit client");
+    client
+        .unshare()
+        .quit()
+        .await
+        .expect("Failed to quit client");
 }

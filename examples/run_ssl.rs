@@ -1,5 +1,5 @@
 use futures_util::TryStreamExt;
-use orcinus::authentication::{AsyncAuthentication, Authentication};
+use orcinus::{authentication::{AsyncAuthentication, Authentication}, SharedMysqlClient};
 use tokio::io::AsyncWriteExt;
 
 /// do not use this at other of localhost connection
@@ -175,7 +175,7 @@ async fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,

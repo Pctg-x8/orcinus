@@ -1,10 +1,10 @@
-//! Binary Protocol
+//! Binary Protocol Implementation
 
 use std::io::Read;
 
 use tokio::io::AsyncRead;
 
-use crate::{ReadCounted, ReadCountedSync};
+use crate::counted_read::{ReadCounted, ReadCountedSync};
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
@@ -12,10 +12,17 @@ use super::{
     OKPacket, Value,
 };
 
+/// Binary Protocol Value format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
+pub trait ValueFormat {
+    /// Serialize value into bytes
+    fn serialize_into(&self, sink: &mut Vec<u8>);
+}
+
 #[repr(transparent)]
+/// ByteString style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct ByteString<'s>(pub &'s [u8]);
-impl ByteString<'_> {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for ByteString<'_> {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.reserve(1 + self.0.len());
         unsafe {
             LengthEncodedInteger(self.0.len() as _)
@@ -26,6 +33,9 @@ impl ByteString<'_> {
     }
 }
 impl<'s> ByteString<'s> {
+    /// Slice from preloaded payload
+    ///
+    /// This operation is copyless
     pub fn slice_from(mut reader: &mut std::io::Cursor<&'s [u8]>) -> std::io::Result<Self> {
         let len = format::LengthEncodedInteger.read_sync(&mut reader)?;
         let s = &reader.get_ref()[reader.position() as usize..(reader.position() + len) as usize];
@@ -33,18 +43,24 @@ impl<'s> ByteString<'s> {
         Ok(Self(s))
     }
 
+    /// Treat content as str
+    ///
+    /// This function does not check whether the content is a valid UTF-8 sequence
     pub unsafe fn as_str_unchecked(&self) -> &'s str {
         std::str::from_utf8_unchecked(self.0)
     }
 }
 
 #[repr(transparent)]
+/// LongLong style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct LongLong(pub u64);
-impl LongLong {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for LongLong {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
+}
+impl LongLong {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
@@ -53,48 +69,60 @@ impl LongLong {
 }
 
 #[repr(transparent)]
+/// Int style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Int(pub u32);
-impl Int {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Int {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
+}
+impl Int {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         format::U32.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Short style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Short(pub u16);
-impl Short {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Short {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
+}
+impl Short {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         format::U16.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Tiny style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Tiny(pub u8);
-impl Tiny {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Tiny {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.push(self.0);
     }
-
+}
+impl Tiny {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         format::U8.read_sync(reader).map(Self)
     }
 }
 
 #[repr(transparent)]
+/// Double style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Double(pub f64);
-impl Double {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Double {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
+}
+impl Double {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 8];
         reader.read_exact(&mut bs)?;
@@ -103,12 +131,15 @@ impl Double {
 }
 
 #[repr(transparent)]
+/// Float style format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
 pub struct Float(pub f32);
-impl Float {
-    pub fn serialize_into(&self, sink: &mut Vec<u8>) {
+impl ValueFormat for Float {
+    fn serialize_into(&self, sink: &mut Vec<u8>) {
         sink.extend(self.0.to_le_bytes());
     }
-
+}
+impl Float {
+    /// Read a value
     pub fn read_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         let mut bs = [0u8; 4];
         reader.read_exact(&mut bs)?;
@@ -118,18 +149,22 @@ impl Float {
 
 // TODO: date time formats
 
-pub trait BinaryProtocolValueDeconstructor {
+/// An value of binary protocol
+pub trait BinaryProtocolValue {
+    /// Serialize value into bytes
     fn serialize_into(&self, sink: &mut Vec<u8>);
+    /// A column type of the value
     fn column_type(&self) -> ColumnType;
 
+    /// Returns whether self is a null value
     #[inline]
     fn is_null(&self) -> bool {
         self.column_type() == ColumnType::Null
     }
 }
-impl<'d, T> BinaryProtocolValueDeconstructor for &'d T
+impl<'d, T> BinaryProtocolValue for &'d T
 where
-    T: BinaryProtocolValueDeconstructor,
+    T: BinaryProtocolValue,
 {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
@@ -147,7 +182,7 @@ where
     }
 }
 
-impl BinaryProtocolValueDeconstructor for Value<'_> {
+impl BinaryProtocolValue for Value<'_> {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         match self {
@@ -207,7 +242,7 @@ impl BinaryProtocolValueDeconstructor for Value<'_> {
         matches!(self, Self::Null)
     }
 }
-impl<A> BinaryProtocolValueDeconstructor for (Value<'_>, A) {
+impl<A> BinaryProtocolValue for (Value<'_>, A) {
     #[inline]
     fn serialize_into(&self, sink: &mut Vec<u8>) {
         self.0.serialize_into(sink)
@@ -224,7 +259,8 @@ impl<A> BinaryProtocolValueDeconstructor for (Value<'_>, A) {
     }
 }
 
-pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValueDeconstructor], sink: &mut Vec<u8>) {
+/// Serialize a [null bitmap](https://dev.mysql.com/doc/internals/en/binary-protocol-resultset-row.html) into bytes
+pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValue], sink: &mut Vec<u8>) {
     fn cv(b: bool, x: u8) -> u8 {
         if b {
             x
@@ -236,50 +272,21 @@ pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValueDeconstructor], s
     sink.reserve((values.len() + 7) / 8);
     for vs in values.chunks(8) {
         let mut f = 0u8;
-        f |= cv(
-            vs.get(0)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x01,
-        );
-        f |= cv(
-            vs.get(1)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x02,
-        );
-        f |= cv(
-            vs.get(2)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x04,
-        );
-        f |= cv(
-            vs.get(3)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x08,
-        );
-        f |= cv(
-            vs.get(4)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x10,
-        );
-        f |= cv(
-            vs.get(5)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x20,
-        );
-        f |= cv(
-            vs.get(6)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x40,
-        );
-        f |= cv(
-            vs.get(7)
-                .map_or(false, BinaryProtocolValueDeconstructor::is_null),
-            0x80,
-        );
+        f |= cv(vs.get(0).map_or(false, BinaryProtocolValue::is_null), 0x01);
+        f |= cv(vs.get(1).map_or(false, BinaryProtocolValue::is_null), 0x02);
+        f |= cv(vs.get(2).map_or(false, BinaryProtocolValue::is_null), 0x04);
+        f |= cv(vs.get(3).map_or(false, BinaryProtocolValue::is_null), 0x08);
+        f |= cv(vs.get(4).map_or(false, BinaryProtocolValue::is_null), 0x10);
+        f |= cv(vs.get(5).map_or(false, BinaryProtocolValue::is_null), 0x20);
+        f |= cv(vs.get(6).map_or(false, BinaryProtocolValue::is_null), 0x40);
+        f |= cv(vs.get(7).map_or(false, BinaryProtocolValue::is_null), 0x80);
 
         sink.push(f);
     }
 }
+
+/// Serialize value types into bytes
+///
 /// values: iterator of (value, unsigned_flag)
 pub fn serialize_value_types<'d>(
     values: impl Iterator<Item = (&'d Value<'d>, bool)>,
@@ -291,8 +298,10 @@ pub fn serialize_value_types<'d>(
         sink.extend([v.column_type() as u8, if uf { 0x80 } else { 0x00 }]);
     }
 }
+
+/// Serialize values into bytes
 pub fn serialize_values<'d>(
-    values: impl Iterator<Item = impl BinaryProtocolValueDeconstructor>,
+    values: impl Iterator<Item = impl BinaryProtocolValue>,
     sink: &mut Vec<u8>,
 ) {
     for v in values {
@@ -300,12 +309,16 @@ pub fn serialize_values<'d>(
     }
 }
 
+/// Single row in binary protocol representation: https://dev.mysql.com/doc/internals/en/binary-protocol-resultset-row.html
 #[derive(Debug)]
 pub struct BinaryResultsetRow {
+    /// bitmap of null values(extra 2 bits at head)
     pub null_bitmap: Vec<u8>,
+    /// values in binary format
     pub values: Vec<u8>,
 }
 impl BinaryResultsetRow {
+    /// Reads the payload
     pub async fn read(
         payload_length: usize,
         column_count: usize,
@@ -324,6 +337,7 @@ impl BinaryResultsetRow {
         })
     }
 
+    /// Reads the payload
     pub fn read_sync(
         payload_length: usize,
         column_count: usize,
@@ -338,6 +352,7 @@ impl BinaryResultsetRow {
         })
     }
 
+    /// Decode values following passed column types.
     #[inline]
     pub fn decode_values<'r, 'cs>(
         &'r self,
@@ -352,6 +367,7 @@ impl BinaryResultsetRow {
     }
 }
 
+/// An iterator decoding values from a binary protocol row
 pub struct BinaryResultsetRowValues<'r, 'cs> {
     null_bitmap: &'r [u8],
     values: std::io::Cursor<&'r [u8]>,
@@ -384,6 +400,7 @@ impl<'r> Iterator for BinaryResultsetRowValues<'r, '_> {
     }
 }
 
+/// Resultset packet in binary protocol
 #[derive(Debug)]
 pub enum BinaryResultset41 {
     Row(BinaryResultsetRow),
@@ -395,6 +412,7 @@ impl BinaryResultset41 {
     const EOF_FORMAT: format::Mapped<EOFPacket41Format, fn(EOFPacket41) -> Self> =
         format::Mapped(EOFPacket41Format, Self::EOF);
 
+    /// Reads the packet
     pub async fn read_packet(
         mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
@@ -433,6 +451,7 @@ impl BinaryResultset41 {
         }
     }
 
+    /// Reads the packet
     pub fn read_packet_sync(
         mut reader: impl Read,
         client_capability: CapabilityFlags,

@@ -3,7 +3,10 @@ use std::io::Read;
 use futures_util::{future::BoxFuture, FutureExt, TryFutureExt};
 use tokio::io::AsyncRead;
 
-use crate::{DefFormatStruct, ReadCounted, ReadCountedSync};
+use crate::{
+    counted_read::{ReadCounted, ReadCountedSync},
+    DefFormatStruct,
+};
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
@@ -11,6 +14,7 @@ use super::{
     GenericOKErrPacket, OKPacket, Value,
 };
 
+/// Creates a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-prepare.html
 pub struct StmtPrepareCommand<'s>(pub &'s str);
 impl super::ClientPacket for StmtPrepareCommand<'_> {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -25,6 +29,7 @@ impl super::ClientPacketIO for StmtPrepareCommand<'_> {
     type Receiver = StmtPrepareResult;
 }
 
+/// Deallocates a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-close.html
 pub struct StmtCloseCommand(pub u32);
 impl super::ClientPacket for StmtCloseCommand {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -36,6 +41,7 @@ impl super::ClientPacket for StmtCloseCommand {
     }
 }
 
+/// Resets prepared statement data: https://dev.mysql.com/doc/internals/en/com-stmt-reset.html
 pub struct StmtResetCommand(pub u32);
 impl super::ClientPacket for StmtResetCommand {
     fn serialize_payload(&self) -> Vec<u8> {
@@ -52,6 +58,7 @@ impl super::ClientPacketIO for StmtResetCommand {
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+/// Execution Flags for Prepared Statement: https://dev.mysql.com/doc/internals/en/com-stmt-execute.html
 pub struct StmtExecuteFlags(u8);
 impl StmtExecuteFlags {
     pub const fn new() -> Self {
@@ -74,6 +81,7 @@ impl StmtExecuteFlags {
     }
 }
 
+/// Execute a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-execute.html
 pub struct StmtExecuteCommand<'p> {
     pub statement_id: u32,
     pub flags: StmtExecuteFlags,
@@ -110,6 +118,7 @@ impl super::ClientPacketIO for StmtExecuteCommand<'_> {
 }
 
 #[derive(Debug)]
+/// OK Response for Prepared Statement: https://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html
 pub struct StmtPrepareOk {
     pub statement_id: u32,
     pub num_columns: u16,
@@ -134,6 +143,7 @@ impl From<RawStmtPrepareOk> for StmtPrepareOk {
     }
 }
 
+/// Format Fragment for `StmtPrepareOk`
 pub struct StmtPrepareOkFormat;
 impl ProtocolFormatFragment for StmtPrepareOkFormat {
     type Output = StmtPrepareOk;
@@ -159,6 +169,7 @@ where
 }
 
 #[derive(Debug)]
+/// Statement Prepare OK or Errored
 pub struct StmtPrepareResult(Result<StmtPrepareOk, ErrPacket>);
 impl From<StmtPrepareOk> for StmtPrepareResult {
     fn from(r: StmtPrepareOk) -> Self {
@@ -171,6 +182,7 @@ impl From<ErrPacket> for StmtPrepareResult {
     }
 }
 impl StmtPrepareResult {
+    /// Converts into `Result`
     #[inline]
     pub fn into_result(self) -> Result<StmtPrepareOk, ErrPacket> {
         self.0
@@ -231,6 +243,7 @@ where
 }
 
 #[derive(Debug)]
+/// Result of Prepared Statement Execution: https://dev.mysql.com/doc/internals/en/com-stmt-execute-response.html
 pub enum StmtExecuteResult {
     Resultset { column_count: u64 },
     Err(ErrPacket),

@@ -11,6 +11,7 @@ use crate::{
     CommunicationError,
 };
 
+/// ClearText Authentication(`"mysql_clear_password"`)
 pub struct ClearText;
 impl super::Authentication for ClearText {
     const NAME: &'static str = "mysql_clear_password";

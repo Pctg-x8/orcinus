@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+use orcinus::SharedMysqlClient;
 
 #[tokio::main]
 async fn main() {
@@ -43,7 +44,7 @@ async fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,

@@ -1,3 +1,5 @@
+use orcinus::SharedMysqlClient;
+
 fn main() {
     let pool = r2d2::Pool::new(orcinus::r2d2::MysqlTcpConnection {
         addr: "127.0.0.1:3306",
@@ -26,7 +28,7 @@ fn main() {
         );
     }
 
-    let client = orcinus::r2d2::SharedPooledClient::share_from(client);
+    let client = orcinus::SharedBlockingClient::share_from(client);
     let mut stmt = client
         .prepare("Select * from test_data where id=?")
         .expect("Failed to prepare stmt");
@@ -35,7 +37,7 @@ fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,

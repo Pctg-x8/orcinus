@@ -1,17 +1,15 @@
+//! bb8 asynchronous connection pooling integration
+
 use async_trait::async_trait;
-use parking_lot::{Mutex, MutexGuard};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::ToSocketAddrs,
-};
+use tokio::net::ToSocketAddrs;
 
-use crate::{
-    protos::{drop_packet, request_async, StmtPrepareCommand},
-    CommunicationError, GenericClient, SharedMysqlClient, Statement,
-};
+use crate::GenericClient;
 
+/// Plain TCP Connection Manager.
 pub struct MysqlTcpConnection<'s, A: ToSocketAddrs> {
+    /// Address to connect.
     pub addr: A,
+    /// An information structure for connection(passed to `Client::handshake`).
     pub con_info: super::ConnectInfo<'s>,
 }
 #[async_trait]
@@ -35,10 +33,31 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection
     }
 }
 
+impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
+    for bb8::PooledConnection<'_, MysqlTcpConnection<'static, A>>
+{
+    type Stream = tokio::net::TcpStream;
+
+    fn stream(&self) -> &Self::Stream {
+        &self.stream
+    }
+    fn stream_mut(&mut self) -> &mut Self::Stream {
+        &mut self.stream
+    }
+    fn capability(&self) -> crate::protos::CapabilityFlags {
+        self.capability
+    }
+}
+
 #[cfg(feature = "autossl")]
+#[cfg_attr(docsrs, doc(cfg(feature = "autossl")))]
+/// TCP/TLS Connection Manager.
 pub struct MysqlConnection<'s, A: ToSocketAddrs> {
+    /// Address to connect.
     pub addr: A,
+    /// Destination server name(used in SNI).
     pub server_name: rustls::ServerName,
+    /// An information structure for connection(passed to `autossl_client::BlockingClient::new`)
     pub con_info: super::autossl_client::SSLConnectInfo<'s>,
 }
 #[cfg(feature = "autossl")]
@@ -61,89 +80,6 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection
     }
     fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
         false
-    }
-}
-
-pub struct SharedPooledClient<'a, M: bb8::ManageConnection>(Mutex<bb8::PooledConnection<'a, M>>);
-impl<'a, M: bb8::ManageConnection> SharedPooledClient<'a, M> {
-    pub fn share_from(p: bb8::PooledConnection<'a, M>) -> Self {
-        Self(Mutex::new(p))
-    }
-
-    pub fn unshare(self) -> bb8::PooledConnection<'a, M> {
-        self.0.into_inner()
-    }
-
-    pub fn lock(&self) -> MutexGuard<bb8::PooledConnection<'a, M>> {
-        self.0.lock()
-    }
-}
-impl<'a: 'c, 'c, M: bb8::ManageConnection> SharedMysqlClient<'c> for SharedPooledClient<'a, M>
-where
-    bb8::PooledConnection<'a, M>: GenericClient,
-{
-    type Client = bb8::PooledConnection<'a, M>;
-    type GuardedClientRef = MutexGuard<'c, bb8::PooledConnection<'a, M>>;
-
-    fn lock_client(&'c self) -> Self::GuardedClientRef {
-        self.lock()
-    }
-}
-impl<'a, M: bb8::ManageConnection> SharedPooledClient<'a, M> {
-    pub async fn prepare<'c>(
-        &'c self,
-        statement: &str,
-    ) -> Result<Statement<'c, SharedPooledClient<'a, M>>, CommunicationError>
-    where
-        Self: SharedMysqlClient<'c>,
-        bb8::PooledConnection<'a, M>: GenericClient,
-        <bb8::PooledConnection<'a, M> as GenericClient>::Stream:
-            AsyncWrite + AsyncRead + Unpin + Send + Sync,
-    {
-        let mut c = self.lock();
-        let cap = c.capability();
-
-        let resp = request_async(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
-            .await?
-            .into_result()?;
-
-        // simply drop unused packets
-        for _ in 0..resp.num_params {
-            drop_packet(c.stream_mut()).await?;
-        }
-        if !cap.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet(c.stream_mut()).await?;
-        }
-
-        for _ in 0..resp.num_columns {
-            drop_packet(c.stream_mut()).await?;
-        }
-        if !cap.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet(c.stream_mut()).await?;
-        }
-
-        Ok(Statement {
-            client: self,
-            statement_id: resp.statement_id,
-        })
-    }
-}
-
-impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
-    for bb8::PooledConnection<'_, MysqlTcpConnection<'static, A>>
-{
-    type Stream = tokio::net::TcpStream;
-
-    fn stream(&self) -> &Self::Stream {
-        &self.stream
-    }
-    fn stream_mut(&mut self) -> &mut Self::Stream {
-        &mut self.stream
-    }
-    fn capability(&self) -> crate::protos::CapabilityFlags {
-        self.capability
     }
 }
 

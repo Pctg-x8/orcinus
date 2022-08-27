@@ -1,3 +1,5 @@
+//! TCP/TLS autoswitching client.
+
 use std::{
     io::{Read, Write},
     net::ToSocketAddrs,
@@ -5,41 +7,17 @@ use std::{
 };
 
 use bufstream::BufStream;
-use parking_lot::{Mutex, MutexGuard};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     authentication::{self, AsyncAuthentication, Authentication},
     protos::{
-        drop_packet, drop_packet_sync, request, request_async, write_packet, write_packet_sync,
-        AsyncReceivePacket, CapabilityFlags, ErrPacket, Handshake, QueryCommand,
-        QueryCommandResponse, QuitCommand, SSLRequest, StmtPrepareCommand,
+        request, write_packet, write_packet_sync, AsyncReceivePacket, CapabilityFlags, ErrPacket,
+        Handshake, QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest,
     },
-    BinaryResultsetIterator, BinaryResultsetStream, BlockingStatement, CommunicationError,
-    GenericClient, Statement, TextResultsetIterator, TextResultsetStream,
+    BinaryResultsetIterator, BinaryResultsetStream, CommunicationError, GenericClient,
+    SharedClient, TextResultsetIterator, TextResultsetStream,
 };
-
-pub struct SharedClient(Mutex<Client>);
-impl SharedClient {
-    pub fn unshare(self) -> Client {
-        self.0.into_inner()
-    }
-
-    pub fn lock(&self) -> MutexGuard<Client> {
-        self.0.lock()
-    }
-}
-
-pub struct SharedBlockingClient(Mutex<BlockingClient>);
-impl SharedBlockingClient {
-    pub fn unshare(self) -> BlockingClient {
-        self.0.into_inner()
-    }
-
-    pub fn lock(&self) -> MutexGuard<BlockingClient> {
-        self.0.lock()
-    }
-}
 
 pub struct SSLConnectInfo<'s> {
     pub base: super::ConnectInfo<'s>,
@@ -204,8 +182,9 @@ impl BlockingClient {
         Ok(Self { stream, capability })
     }
 
-    pub fn share(self) -> SharedBlockingClient {
-        SharedBlockingClient(Mutex::new(self))
+    #[inline]
+    pub fn share(self) -> SharedClient<Self> {
+        SharedClient::share_from(self)
     }
 
     pub fn quit(&mut self) -> std::io::Result<()> {
@@ -366,8 +345,8 @@ impl Client {
         Ok(Self { stream, capability })
     }
 
-    pub fn share(self) -> SharedClient {
-        SharedClient(Mutex::new(self))
+    pub fn share(self) -> SharedClient<Self> {
+        SharedClient::share_from(self)
     }
 
     pub async fn quit(&mut self) -> std::io::Result<()> {
@@ -437,93 +416,5 @@ impl GenericClient for BlockingClient {
     }
     fn capability(&self) -> CapabilityFlags {
         self.capability
-    }
-}
-
-impl<'s> super::SharedMysqlClient<'s> for SharedClient {
-    type Client = Client;
-    type GuardedClientRef = MutexGuard<'s, Client>;
-
-    fn lock_client(&'s self) -> Self::GuardedClientRef {
-        self.0.lock()
-    }
-}
-
-impl<'c> super::SharedBlockingMysqlClient<'c> for SharedBlockingClient {
-    type Client = BlockingClient;
-    type GuardedClientRef = MutexGuard<'c, BlockingClient>;
-
-    fn lock_client(&'c self) -> Self::GuardedClientRef {
-        self.lock()
-    }
-}
-
-impl SharedClient {
-    pub async fn prepare<'c, 's: 'c>(
-        &'c self,
-        statement: &'s str,
-    ) -> Result<Statement<'c, Self>, CommunicationError> {
-        let mut c = self.lock();
-        let cap = c.capability;
-
-        let resp = request_async(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
-            .await?
-            .into_result()?;
-
-        // simply drop unused packets
-        for _ in 0..resp.num_params {
-            drop_packet(&mut c.stream).await?;
-        }
-        if !c.capability.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet(&mut c.stream).await?
-        }
-
-        for _ in 0..resp.num_columns {
-            drop_packet(&mut c.stream).await?;
-        }
-        if !c.capability.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet(&mut c.stream).await?
-        }
-
-        Ok(Statement {
-            client: self,
-            statement_id: resp.statement_id,
-        })
-    }
-}
-
-impl SharedBlockingClient {
-    pub fn prepare<'c, 's: 'c>(
-        &'c self,
-        statement: &'s str,
-    ) -> Result<BlockingStatement<'c, Self>, CommunicationError> {
-        let mut c = self.lock();
-        let cap = c.capability;
-
-        let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
-
-        // simply drop unused packets
-        for _ in 0..resp.num_params {
-            drop_packet_sync(&mut c.stream)?;
-        }
-        if !c.capability.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet_sync(&mut c.stream)?
-        }
-
-        for _ in 0..resp.num_columns {
-            drop_packet_sync(&mut c.stream)?;
-        }
-        if !c.capability.support_deprecate_eof() {
-            // extra eof packet
-            drop_packet_sync(&mut c.stream)?
-        }
-
-        Ok(BlockingStatement {
-            client: self,
-            statement_id: resp.statement_id,
-        })
     }
 }

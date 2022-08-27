@@ -12,7 +12,9 @@ keywords = ["mysql"]
 categories = ["asynchronous", "database"]
 exclude = ["examples/", ".vscode", ".github"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []

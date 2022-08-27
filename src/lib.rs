@@ -1,3 +1,11 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+//! https://ja.wikipedia.org/wiki/%E3%82%B7%E3%83%A3%E3%83%81
+//!
+//! async-ready mysql protocol implementation and wrapper libraries.
+//!
+//! Examples(usage) are in the [repository](https://github.com/Pctg-x8/orcinus)
+
 mod mysql;
 use std::io::{Read, Write};
 
@@ -24,6 +32,7 @@ use mysql::protos::Value;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
 use crate::authentication::Authentication;
@@ -34,9 +43,12 @@ pub use self::mysql::*;
 mod resultset_stream;
 pub use self::resultset_stream::*;
 
+/// Composited error while communicating with MySQL server.
 #[derive(Debug)]
 pub enum CommunicationError {
+    /// IO Error from socket
     IO(std::io::Error),
+    /// Error packet returned from server
     Server(ErrPacket),
 }
 impl From<std::io::Error> for CommunicationError {
@@ -59,28 +71,39 @@ impl std::fmt::Display for CommunicationError {
 }
 impl std::error::Error for CommunicationError {}
 
-pub struct SharedClient<Stream: AsyncWriteExt + Send + Sync + Unpin>(Mutex<Client<Stream>>);
-impl<Stream: AsyncWriteExt + Send + Sync + Unpin> SharedClient<Stream> {
-    pub fn unshare(self) -> Client<Stream> {
-        self.0.into_inner()
+/// MySQL Client that can be dynamically locked.
+pub struct SharedClient<C: GenericClient>(Mutex<C>);
+impl<C: GenericClient> SharedClient<C> {
+    /// Wraps standalone connection.
+    #[inline]
+    pub const fn share_from(client: C) -> Self {
+        Self(Mutex::new(client))
     }
 
-    pub fn lock(&self) -> MutexGuard<Client<Stream>> {
-        self.0.lock()
+    /// Unwraps inner client connection.
+    #[inline]
+    pub fn unshare(self) -> C {
+        self.0.into_inner()
     }
 }
 
-pub struct SharedBlockingClient<Stream: Write>(Mutex<BlockingClient<Stream>>);
-impl<Stream: Write> SharedBlockingClient<Stream> {
-    pub fn unshare(self) -> BlockingClient<Stream> {
-        self.0.into_inner()
+/// MySQL Client with Blocking communication, that can be dynamically locked.
+pub struct SharedBlockingClient<C: GenericClient>(Mutex<C>);
+impl<C: GenericClient> SharedBlockingClient<C> {
+    /// Wraps standalone connection.
+    #[inline]
+    pub const fn share_from(client: C) -> Self {
+        Self(Mutex::new(client))
     }
 
-    pub fn lock(&self) -> MutexGuard<BlockingClient<Stream>> {
-        self.0.lock()
+    /// Unwraps inner client connection.
+    #[inline]
+    pub fn unshare(self) -> C {
+        self.0.into_inner()
     }
 }
 
+/// An information structure to connect to MySQL server.
 pub struct ConnectInfo<'s> {
     username: &'s str,
     password: &'s str,
@@ -89,6 +112,7 @@ pub struct ConnectInfo<'s> {
     character_set: u8,
 }
 impl<'s> ConnectInfo<'s> {
+    /// Build an information structure with username and password.
     pub fn new(username: &'s str, password: &'s str) -> Self {
         Self {
             username,
@@ -99,30 +123,34 @@ impl<'s> ConnectInfo<'s> {
         }
     }
 
-    /// Sets initial connected database name: default is `None`
+    /// Set initial connected database name: default is `None`
     pub fn database(mut self, db_name: &'s str) -> Self {
         self.database = Some(db_name);
         self
     }
 
-    /// Sets max packet size: default is big enough value
+    /// Set max packet size: default is big enough value
     pub fn max_packet_size(mut self, packet_size: u32) -> Self {
         self.max_packet_size = packet_size;
         self
     }
 
-    /// Sets character set: default is utf8mb4
+    /// Set character set: default is utf8mb4
     pub fn character_set(mut self, character_set: u8) -> Self {
         self.character_set = character_set;
         self
     }
 }
 
+/// A MySQL Client that provides blocking operations.
+///
+/// This can be used for non-asynchronous environment(such as r2d2-integrated app, or non-asynchronous web server framework).
 pub struct BlockingClient<Stream: Write> {
     stream: Stream,
     capability: CapabilityFlags,
 }
 impl<Stream: Write> BlockingClient<Stream> {
+    /// Negotiate handshake protocol with MySQL server on specified stream and information.
     pub fn handshake(
         mut stream: Stream,
         connect_info: &ConnectInfo,
@@ -198,22 +226,27 @@ impl<Stream: Write> BlockingClient<Stream> {
         Ok(unsafe { Self::new(stream, capability) })
     }
 
+    /// Create Blocking Client with already handshaked streams.
+    ///
     /// this function does not perform handshaking. user must be done the operation.
     pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
-        Self {
-            stream: stream,
-            capability,
-        }
+        Self { stream, capability }
     }
 
-    pub fn share(self) -> SharedBlockingClient<Stream> {
-        SharedBlockingClient(Mutex::new(self))
+    /// Ready to share this client in some objects.
+    ///
+    /// This operation is required for using Prepared Statements.
+    #[inline]
+    pub const fn share(self) -> SharedBlockingClient<Self> {
+        SharedBlockingClient::share_from(self)
     }
 
+    /// Quit communication with server.
     pub fn quit(&mut self) -> std::io::Result<()> {
         write_packet_sync(&mut self.stream, QuitCommand, 0)
     }
 
+    /// Post SQL statement to server.
     pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
     where
         Stream: Read,
@@ -221,6 +254,7 @@ impl<Stream: Write> BlockingClient<Stream> {
         request(QueryCommand(query), &mut self.stream, 0, self.capability)
     }
 
+    /// Post SQL statement to server, and fetch result sets by iterator(fetching is lazily executed).
     pub fn fetch_all<'s>(
         &'s mut self,
         query: &str,
@@ -240,6 +274,7 @@ impl<Stream: Write> BlockingClient<Stream> {
         }
     }
 
+    /// Fetch result sets of last query execution by iterator(fetching is lazily executed).
     pub fn text_resultset_iterator(
         &mut self,
         column_count: usize,
@@ -250,6 +285,7 @@ impl<Stream: Write> BlockingClient<Stream> {
         TextResultsetIterator::new(&mut self.stream, column_count, self.capability)
     }
 
+    /// Fetch result sets of last prepared statement execution by iterator(fetching is lazily executed).
     pub fn binary_resultset_iterator(
         &mut self,
         column_count: usize,
@@ -266,6 +302,7 @@ impl<Stream: Write> Drop for BlockingClient<Stream> {
     }
 }
 impl BlockingClient<std::net::TcpStream> {
+    /// Make non-blocking client.
     pub fn into_async(self) -> Client<tokio::io::BufStream<tokio::net::TcpStream>> {
         let stream = unsafe { std::ptr::read(&self.stream as *const std::net::TcpStream) };
         let capability = self.capability;
@@ -284,11 +321,13 @@ impl BlockingClient<std::net::TcpStream> {
     }
 }
 
+/// A MySQL Client that provides non-blocking operations.
 pub struct Client<Stream: AsyncWriteExt + Send + Sync + Unpin> {
     stream: Stream,
     capability: CapabilityFlags,
 }
 impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
+    /// Negotiate handshake protocol with MySQL server on specified stream and information.
     pub async fn handshake(
         mut stream: Stream,
         connect_info: &ConnectInfo<'_>,
@@ -371,20 +410,28 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         Ok(unsafe { Self::new(stream, capability) })
     }
 
+    /// Create Blocking Client with already handshaked streams.
+    ///
     /// this function does not perform handshaking. user must be done the operation.
     pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
         Self { stream, capability }
     }
 
-    pub fn share(self) -> SharedClient<Stream> {
-        SharedClient(Mutex::new(self))
+    /// Ready to share this client in some objects.
+    ///
+    /// This operation is required for using Prepared Statements.
+    #[inline]
+    pub const fn share(self) -> SharedClient<Self> {
+        SharedClient::share_from(self)
     }
 
+    /// Quit communication with server.
     pub async fn quit(&mut self) -> std::io::Result<()> {
         write_packet(&mut self.stream, QuitCommand, 0).await?;
         Ok(())
     }
 
+    /// Post SQL statement to server.
     pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse>
     where
         Stream: AsyncRead + Sync + Send,
@@ -394,6 +441,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
     }
 
+    /// Post SQL statement to server, and fetch result sets by stream(fetching is lazily executed).
     pub async fn fetch_all<'s>(
         &'s mut self,
         query: &'s str,
@@ -414,6 +462,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         }
     }
 
+    /// Fetch result sets of last query execution by stream(fetching is lazily executed).
     pub async fn text_resultset_stream<'s>(
         &'s mut self,
         column_count: usize,
@@ -424,6 +473,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         TextResultsetStream::new(&mut self.stream, column_count, self.capability).await
     }
 
+    /// Fetch result sets of last prepared statement execution by stream(fetching is lazily executed).
     pub async fn binary_resultset_stream<'s>(
         &'s mut self,
         column_count: usize,
@@ -440,11 +490,16 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Drop for Client<Stream> {
     }
 }
 
+/// Common client-capable implementation.
 pub trait GenericClient {
+    /// Stream object that used communicating with server.
     type Stream;
 
+    /// Retrieve stream by immutable reference.
     fn stream(&self) -> &Self::Stream;
+    /// Retrieve stream by mutable reference.
     fn stream_mut(&mut self) -> &mut Self::Stream;
+    /// Client side capability flags.
     fn capability(&self) -> CapabilityFlags;
 }
 impl<C: GenericClient> GenericClient for MutexGuard<'_, C> {
@@ -487,50 +542,59 @@ impl<S: Write> GenericClient for BlockingClient<S> {
     }
 }
 
+/// Common interface of shareable client.
 pub trait SharedMysqlClient<'s> {
+    /// Underlying client type.
     type Client: GenericClient;
+    /// Locking guard object that wraps underlying client.
     type GuardedClientRef: 's + std::ops::Deref<Target = Self::Client> + std::ops::DerefMut;
 
+    /// Obtain exclusive lock of underlying client.
+    ///
+    /// Clients need have exclusive access to communicate with MySQL server, so users must obtain it at first.
     fn lock_client(&'s self) -> Self::GuardedClientRef;
 }
-impl<'s, S> SharedMysqlClient<'s> for SharedClient<S>
+impl<'s, C: 's> SharedMysqlClient<'s> for SharedClient<C>
 where
-    S: AsyncWriteExt + Unpin + Send + Sync + 's,
+    C: GenericClient,
 {
-    type Client = Client<S>;
-    type GuardedClientRef = MutexGuard<'s, Client<S>>;
+    type Client = C;
+    type GuardedClientRef = MutexGuard<'s, C>;
 
+    #[inline]
+    fn lock_client(&'s self) -> Self::GuardedClientRef {
+        self.0.lock()
+    }
+}
+impl<'s, C: 's> SharedMysqlClient<'s> for SharedBlockingClient<C>
+where
+    C: GenericClient,
+{
+    type Client = C;
+    type GuardedClientRef = MutexGuard<'s, C>;
+
+    #[inline]
     fn lock_client(&'s self) -> Self::GuardedClientRef {
         self.0.lock()
     }
 }
 
-pub trait SharedBlockingMysqlClient<'s> {
-    type Client: GenericClient;
-    type GuardedClientRef: 's + std::ops::Deref<Target = Self::Client> + std::ops::DerefMut;
-
-    fn lock_client(&'s self) -> Self::GuardedClientRef;
-}
-impl<'c, Stream: Write + 'c> SharedBlockingMysqlClient<'c> for SharedBlockingClient<Stream> {
-    type Client = BlockingClient<Stream>;
-    type GuardedClientRef = MutexGuard<'c, BlockingClient<Stream>>;
-
-    fn lock_client(&'c self) -> Self::GuardedClientRef {
-        self.lock()
-    }
-}
-
+/// Represents Prepared Statement.
 pub struct Statement<'c, C: SharedMysqlClient<'c>> {
     client: &'c C,
     statement_id: u32,
 }
-impl<Stream: AsyncWriteExt + AsyncRead + Send + Sync + Unpin> SharedClient<Stream> {
+impl<C: GenericClient> SharedClient<C> {
+    /// Prepare the statement.
     pub async fn prepare<'c, 's: 'c>(
         &'c self,
         statement: &'s str,
-    ) -> Result<Statement<'c, Self>, CommunicationError> {
-        let mut c = self.lock();
-        let cap = c.capability;
+    ) -> Result<Statement<'c, Self>, CommunicationError>
+    where
+        C::Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let mut c = self.lock_client();
+        let cap = c.capability();
 
         let resp = request_async(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)
             .await?
@@ -538,19 +602,19 @@ impl<Stream: AsyncWriteExt + AsyncRead + Send + Sync + Unpin> SharedClient<Strea
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
-            drop_packet(&mut c.stream).await?;
+            drop_packet(c.stream_mut()).await?;
         }
-        if !c.capability.support_deprecate_eof() {
+        if !cap.support_deprecate_eof() {
             // extra eof packet
-            drop_packet(&mut c.stream).await?
+            drop_packet(c.stream_mut()).await?
         }
 
         for _ in 0..resp.num_columns {
-            drop_packet(&mut c.stream).await?;
+            drop_packet(c.stream_mut()).await?;
         }
-        if !c.capability.support_deprecate_eof() {
+        if !cap.support_deprecate_eof() {
             // extra eof packet
-            drop_packet(&mut c.stream).await?
+            drop_packet(c.stream_mut()).await?
         }
 
         Ok(Statement {
@@ -563,6 +627,7 @@ impl<'c, C: SharedMysqlClient<'c>> Statement<'c, C>
 where
     <C::Client as GenericClient>::Stream: AsyncWriteExt + Send + Sync + Unpin,
 {
+    /// Close the Prepared Statement.
     pub async fn close(self) -> std::io::Result<()> {
         write_packet(
             self.client.lock_client().stream_mut(),
@@ -574,6 +639,7 @@ where
         Ok(())
     }
 
+    /// Reset the Prepared Statement.
     pub async fn reset(&mut self) -> Result<(), CommunicationError>
     where
         <C::Client as GenericClient>::Stream: AsyncRead,
@@ -587,6 +653,8 @@ where
         Ok(())
     }
 
+    /// Execute statement with binding parameters.
+    ///
     /// parameters: an array of (value, unsigned flag)
     pub async fn execute(
         &mut self,
@@ -622,38 +690,43 @@ impl<'c, C: SharedMysqlClient<'c>> Drop for Statement<'c, C> {
     }
 }
 
-pub struct BlockingStatement<'c, C: SharedBlockingMysqlClient<'c>>
+/// Represents Prepared Statement with blocking communication.
+pub struct BlockingStatement<'c, C: SharedMysqlClient<'c>>
 where
     <C::Client as GenericClient>::Stream: Write,
 {
     client: &'c C,
     statement_id: u32,
 }
-impl<Stream: Write + Read> SharedBlockingClient<Stream> {
+impl<C: GenericClient> SharedBlockingClient<C> {
+    /// Prepare the statement.
     pub fn prepare<'c, 's: 'c>(
         &'c self,
         statement: &'s str,
-    ) -> Result<BlockingStatement<'c, Self>, CommunicationError> {
-        let mut c = self.lock();
-        let cap = c.capability;
+    ) -> Result<BlockingStatement<'c, Self>, CommunicationError>
+    where
+        C::Stream: Read + Write,
+    {
+        let mut c = self.lock_client();
+        let cap = c.capability();
 
         let resp = request(StmtPrepareCommand(statement), c.stream_mut(), 0, cap)?.into_result()?;
 
         // simply drop unused packets
         for _ in 0..resp.num_params {
-            drop_packet_sync(&mut c.stream)?;
+            drop_packet_sync(c.stream_mut())?;
         }
-        if !c.capability.support_deprecate_eof() {
+        if !cap.support_deprecate_eof() {
             // extra eof packet
-            drop_packet_sync(&mut c.stream)?
+            drop_packet_sync(c.stream_mut())?
         }
 
         for _ in 0..resp.num_columns {
-            drop_packet_sync(&mut c.stream)?;
+            drop_packet_sync(c.stream_mut())?;
         }
-        if !c.capability.support_deprecate_eof() {
+        if !cap.support_deprecate_eof() {
             // extra eof packet
-            drop_packet_sync(&mut c.stream)?
+            drop_packet_sync(c.stream_mut())?
         }
 
         Ok(BlockingStatement {
@@ -662,10 +735,11 @@ impl<Stream: Write + Read> SharedBlockingClient<Stream> {
         })
     }
 }
-impl<'c, C: SharedBlockingMysqlClient<'c>> BlockingStatement<'c, C>
+impl<'c, C: SharedMysqlClient<'c>> BlockingStatement<'c, C>
 where
     <C::Client as GenericClient>::Stream: Write,
 {
+    /// Close the Prepared Statement.
     pub fn close(&mut self) -> std::io::Result<()> {
         write_packet_sync(
             self.client.lock_client().stream_mut(),
@@ -674,6 +748,7 @@ where
         )
     }
 
+    /// Reset the Prepared Statement.
     pub fn reset(&mut self) -> Result<(), CommunicationError>
     where
         <C::Client as GenericClient>::Stream: Read,
@@ -685,6 +760,8 @@ where
         Ok(())
     }
 
+    /// Execute statement with binding parameters.
+    ///
     /// parameters: an array of (value, unsigned flag)
     pub fn execute(
         &mut self,
@@ -710,7 +787,7 @@ where
         )
     }
 }
-impl<'c, C: SharedBlockingMysqlClient<'c>> Drop for BlockingStatement<'c, C>
+impl<'c, C: SharedMysqlClient<'c>> Drop for BlockingStatement<'c, C>
 where
     <C::Client as GenericClient>::Stream: Write,
 {
@@ -719,13 +796,17 @@ where
     }
 }
 
+mod counted_read;
 mod async_utils;
 
 #[cfg(feature = "r2d2-integration")]
+#[cfg_attr(docsrs, doc(cfg(feature = "r2d2-integration")))]
 pub mod r2d2;
 
 #[cfg(feature = "bb8-integration")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bb8-integration")))]
 pub mod bb8;
 
 #[cfg(feature = "autossl")]
+#[cfg_attr(docsrs, doc(cfg(feature = "autossl")))]
 pub mod autossl_client;

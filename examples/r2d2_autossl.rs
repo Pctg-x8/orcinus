@@ -1,3 +1,5 @@
+use orcinus::SharedMysqlClient;
+
 /// do not use this at other of localhost connection
 pub struct MysqlCertForceVerifier;
 impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
@@ -56,7 +58,7 @@ fn main() {
         );
     }
 
-    let client = orcinus::r2d2::SharedPooledClient::share_from(client);
+    let client = orcinus::SharedBlockingClient::share_from(client);
     let mut stmt = client
         .prepare("Select * from test_data where id=?")
         .expect("Failed to prepare stmt");
@@ -65,7 +67,7 @@ fn main() {
         .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock();
+        let mut c = client.lock_client();
 
         let column_count = match exec_resp {
             orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,

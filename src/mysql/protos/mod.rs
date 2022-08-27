@@ -1,3 +1,5 @@
+//! MySQL Client/Server Protocol Implementation: https://dev.mysql.com/doc/internals/en/client-server-protocol.html
+
 use std::io::Read;
 use std::io::Write;
 
@@ -6,16 +8,17 @@ use futures_util::FutureExt;
 use futures_util::TryFutureExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::counted_read::{ReadCounted, ReadCountedSync};
 use crate::DefFormatStruct;
-use crate::ReadCounted;
-use crate::ReadCountedSync;
 
 #[derive(Debug)]
+/// The header of all MySQL packets: https://dev.mysql.com/doc/internals/en/mysql-packet.html
 pub struct PacketHeader {
     pub payload_length: u32,
     pub sequence_id: u8,
 }
 impl PacketHeader {
+    /// Serializes data into bytes.
     #[inline]
     pub const fn serialize_bytes(&self) -> [u8; 4] {
         [
@@ -26,6 +29,7 @@ impl PacketHeader {
         ]
     }
 
+    /// Composes data from bytes.
     #[inline]
     pub const fn from_fixed_bytes(bytes: [u8; 4]) -> Self {
         Self {
@@ -35,6 +39,7 @@ impl PacketHeader {
     }
 }
 
+/// Writes a packet(non-blocking op).
 pub async fn write_packet(
     mut writer: impl AsyncWrite + Unpin,
     payload: impl ClientPacket,
@@ -53,6 +58,7 @@ pub async fn write_packet(
         .await?;
     writer.write_all(&payload).await
 }
+/// Writes a packet(blocking op).
 pub fn write_packet_sync(
     mut writer: impl Write,
     payload: impl ClientPacket,
@@ -70,6 +76,9 @@ pub fn write_packet_sync(
     writer.write_all(&payload)
 }
 
+/// Drops single packet(non-blocking op).
+///
+/// This op reads a packet header, then reads its payload and discard it.
 pub async fn drop_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::Result<()> {
     let header = format::PacketHeader.read_format(&mut reader).await?;
     let _discard = format::Bytes(header.payload_length as _)
@@ -78,6 +87,9 @@ pub async fn drop_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::
 
     Ok(())
 }
+/// Drops single packet(blocking op).
+///
+/// This op reads a packet header, then reads its payload and discard it.
 pub fn drop_packet_sync(mut reader: impl Read) -> std::io::Result<()> {
     let header = format::PacketHeader.read_sync(&mut reader)?;
     let _discard = format::Bytes(header.payload_length as _).read_sync(reader)?;
@@ -85,8 +97,9 @@ pub fn drop_packet_sync(mut reader: impl Read) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The client-side packet serialization.
+/// The client-side packet.
 pub trait ClientPacket {
+    /// Serializes payload into bytes.
     fn serialize_payload(&self) -> Vec<u8>;
 }
 impl<T: ClientPacket + ?Sized> ClientPacket for Box<T> {
@@ -104,6 +117,7 @@ impl ClientPacket for Vec<u8> {
         self.to_owned()
     }
 }
+
 /// A packet that knows how to receive it from server synchronously.
 pub trait ReceivePacket: Sized {
     /// Read a packet from reader.
@@ -126,7 +140,7 @@ pub trait ClientPacketIO: ClientPacket {
     /// Client expects this type of packet will be returned from server.
     type Receiver: ReceivePacket;
 }
-/// Synchronous communication between client and server.
+/// Blocking communication between client and server.
 pub fn request<P: ClientPacketIO>(
     msg: P,
     mut stream: impl Read + Write,
@@ -140,7 +154,7 @@ where
     stream.flush()?;
     P::Receiver::read_packet(stream, client_capability)
 }
-/// Asynchronous communication between client and server.
+/// Non-blocking communication between client and server.
 pub async fn request_async<'r, R, P: ClientPacketIO>(
     msg: P,
     mut stream: R,
@@ -158,8 +172,10 @@ where
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+/// Length-Encoded Integer Format implementation: https://dev.mysql.com/doc/internals/en/integer.html#length-encoded-integer
 pub struct LengthEncodedInteger(pub u64);
 impl LengthEncodedInteger {
+    /// Calculates serialized size.
     pub fn payload_size(&self) -> usize {
         if self.0 < 251 {
             1
@@ -172,12 +188,14 @@ impl LengthEncodedInteger {
         }
     }
 
+    /// Reads from reader(blocking).
     pub fn read_sync(mut reader: impl Read) -> std::io::Result<Self> {
         let mut first_byte = [0u8; 1];
         reader.read_exact(&mut first_byte)?;
         Self::read_ahead_sync(first_byte[0], reader)
     }
 
+    /// Reads from reader(blocking). The first byte is read externally.
     pub fn read_ahead_sync(first_byte: u8, mut reader: impl Read) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
@@ -200,11 +218,13 @@ impl LengthEncodedInteger {
         }
     }
 
+    /// Reads from reader(non-blocking).
     pub async fn read(reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         let first_byte = reader.read_u8().await?;
         Self::read_ahead(first_byte, reader).await
     }
 
+    /// Reads from reader(non-blocking). The first byte is read externally.
     pub async fn read_ahead(
         first_byte: u8,
         reader: &mut (impl AsyncRead + Unpin + ?Sized),
@@ -222,6 +242,7 @@ impl LengthEncodedInteger {
         }
     }
 
+    /// Writes as bytes(non-blocking).
     pub fn write_sync(&self, writer: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
         if self.0 < 251 {
             writer.write_all(&[self.0 as u8])
@@ -248,6 +269,7 @@ impl LengthEncodedInteger {
         }
     }
 
+    /// Writes as bytes(blocking).
     pub async fn write(
         &self,
         writer: &mut (impl AsyncWrite + Unpin + ?Sized),
@@ -285,12 +307,18 @@ impl LengthEncodedInteger {
 }
 
 #[derive(Debug)]
+/// Capability dependent data in OKPacket.
 pub enum OKPacketCapabilityExtraData {
+    /// Returned data to client that supports 4.1 Protocol.
     Protocol41 {
+        /// status flags
         status_flags: StatusFlags,
+        /// number of warnings
         warnings: u16,
     },
+    /// Returned data to client that expects Status Flags in EOF Packet.
     Transactions {
+        /// status flags
         status_flags: StatusFlags,
     },
 }
@@ -318,11 +346,17 @@ impl From<RawOKPacketTransactionsExt> for OKPacketCapabilityExtraData {
 }
 
 #[derive(Debug)]
+/// OK_Packet: https://dev.mysql.com/doc/internals/en/packet-OK_Packet.html
 pub struct OKPacket {
+    /// Number of affected rows in last query.
     pub affected_rows: u64,
+    /// Last inserted id.
     pub last_insert_id: u64,
+    /// Capability dependent data.
     pub capability_extra: Option<OKPacketCapabilityExtraData>,
+    /// Human readable status information.
     pub info: String,
+    /// Session state info, provided only if client supports Session Tracking and server's session state has changed.
     pub session_state_changes: Option<String>,
 }
 DefFormatStruct!(RawOKPacketCommonHeader(RawOKPacketCommonHeaderFormat) {
@@ -330,6 +364,7 @@ DefFormatStruct!(RawOKPacketCommonHeader(RawOKPacketCommonHeaderFormat) {
     last_insert_id(u64) <- format::LengthEncodedInteger
 });
 impl OKPacket {
+    /// Reads a packet that is expected as OKPacket.
     pub async fn expected_read(
         mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
         client_capability: CapabilityFlags,
@@ -347,6 +382,7 @@ impl OKPacket {
         .await
     }
 
+    /// Reads a packet that is expected as OKPacket.
     pub fn expected_read_packet_sync(
         mut reader: impl Read,
         client_capability: CapabilityFlags,
@@ -363,6 +399,7 @@ impl OKPacket {
         )
     }
 
+    /// Reads the payload(non-blocking).
     pub async fn read(
         payload_size: usize,
         mut reader: &mut ReadCounted<impl AsyncRead + Send + Unpin>,
@@ -417,6 +454,7 @@ impl OKPacket {
         })
     }
 
+    /// Reads the payload(blocking).
     pub fn read_sync(
         payload_length: usize,
         mut reader: &mut ReadCountedSync<impl Read>,
@@ -464,6 +502,9 @@ impl OKPacket {
         })
     }
 
+    /// Status flags contained in this packet.
+    ///
+    /// Returns `None` if no status flags is contained.
     #[inline]
     pub fn status_flags(&self) -> Option<StatusFlags> {
         match self.capability_extra {
@@ -477,12 +518,17 @@ impl OKPacket {
 }
 
 #[derive(Debug)]
+/// ERR_Packet: https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
 pub struct ErrPacket {
+    /// Error code
     pub code: u16,
+    /// SQL State bytes
     pub sql_state: Option<[u8; 5]>,
+    /// Human readable error message
     pub error_message: String,
 }
 impl ErrPacket {
+    /// Reads the payload(non-blocking)
     pub async fn read(
         payload_size: usize,
         mut reader: &mut ReadCounted<impl AsyncRead + Send + Unpin>,
@@ -509,6 +555,7 @@ impl ErrPacket {
         })
     }
 
+    /// Reads the payload(blocking)
     pub fn read_sync(
         payload_size: usize,
         mut reader: &mut ReadCountedSync<impl Read>,
@@ -533,8 +580,11 @@ impl ErrPacket {
 }
 
 #[derive(Debug)]
+/// EOF_Packet(4.1 Protocol): https://dev.mysql.com/doc/internals/en/packet-EOF_Packet.html
 pub struct EOFPacket41 {
+    /// number of warnings
     pub warnings: u16,
+    /// Status Flags
     pub status_flags: StatusFlags,
 }
 DefFormatStruct!(pub RawEOFPacket41(RawEOFPacket41Format) {
@@ -554,6 +604,7 @@ DefFormatStruct!(RawEOFPacket41ExpectHeader(RawEOFPacket41ExpectHeaderFormat) {
     _mark(u8) <- format::U8.assert_eq(0xfe)
 });
 impl EOFPacket41 {
+    /// Reads a packet that is expected as EOFPacket(non-blocking).
     pub async fn expected_read_packet(
         mut reader: impl AsyncRead + Send + Unpin,
     ) -> std::io::Result<Self> {
@@ -563,22 +614,25 @@ impl EOFPacket41 {
         EOFPacket41Format.read_format(reader).await
     }
 
+    /// Reads a packet that is expected as EOFPacket(blocking).
     pub fn expected_read_packet_sync(mut reader: impl Read) -> std::io::Result<Self> {
         let _ = RawEOFPacket41ExpectHeaderFormat.read_sync(&mut reader)?;
         EOFPacket41Format.read_sync(reader)
     }
 }
 
+/// Format Fragment of EOFPacket41.
 pub struct EOFPacket41Format;
-impl format::ProtocolFormatFragment for EOFPacket41Format {
+impl ProtocolFormatFragment for EOFPacket41Format {
     type Output = EOFPacket41;
 
     fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
         RawEOFPacket41Format.read_sync(reader).map(From::from)
     }
 }
-impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'r, R>
-    for EOFPacket41Format
+impl<'r, R> AsyncProtocolFormatFragment<'r, R> for EOFPacket41Format
+where
+    R: AsyncRead + Send + Unpin + 'r,
 {
     type ReaderF = futures_util::future::MapOk<
         <RawEOFPacket41Format as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
@@ -591,6 +645,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'
 }
 
 #[derive(Debug)]
+/// OK_Packet or ERR_Packet, with sequence id.
 pub struct GenericOKErrPacket(Result<OKPacket, ErrPacket>, u8);
 impl From<(OKPacket, u8)> for GenericOKErrPacket {
     fn from((d, sid): (OKPacket, u8)) -> Self {
@@ -603,6 +658,7 @@ impl From<(ErrPacket, u8)> for GenericOKErrPacket {
     }
 }
 impl GenericOKErrPacket {
+    /// Converts into `Result`.
     #[inline]
     pub fn into_result(self) -> Result<(OKPacket, u8), ErrPacket> {
         match self.0 {

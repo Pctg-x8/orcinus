@@ -9,12 +9,18 @@ use crate::async_utils::{
     ReadBytesF, ReadF, ReadFixedBytesF, ReadLengthEncodedIntegerF, ReadNullTerminatedStringF,
 };
 
+/// A fragment of Protocol Format
+///
+/// Most protocols are constructed as group of Format Fragments.
+/// This allows unified implementation of readers both synchronous and asynchronous.
 pub trait ProtocolFormatFragment {
+    /// Output value type of the format
     type Output;
 
+    /// Reads a value
     fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output>;
 
-    /// (<$>) operator
+    /// `(<$>)` operator
     #[inline]
     fn map<F, R>(self, mapper: F) -> Mapped<Self, F>
     where
@@ -24,6 +30,7 @@ pub trait ProtocolFormatFragment {
         Mapped(self, mapper)
     }
 
+    /// Asserts the value using [`assert_eq!`]
     #[inline]
     fn assert_eq(self, right: Self::Output) -> AssertEq<Self>
     where
@@ -34,12 +41,16 @@ pub trait ProtocolFormatFragment {
     }
 }
 
+/// Asynchronous reader implementation for Format Fragments
 pub trait AsyncProtocolFormatFragment<'r, R: 'r + Send>: ProtocolFormatFragment {
+    /// Future type of reading the format
     type ReaderF: std::future::Future<Output = std::io::Result<Self::Output>> + Send + 'r;
 
+    /// Read a value asynchronously
     fn read_format(self, reader: R) -> Self::ReaderF;
 }
 
+/// u8(byte) format
 pub struct U8;
 impl ProtocolFormatFragment for U8 {
     type Output = u8;
@@ -63,6 +74,7 @@ where
     }
 }
 
+// u16(unsigned short) format
 pub struct U16;
 impl ProtocolFormatFragment for U16 {
     type Output = u16;
@@ -86,6 +98,7 @@ where
     }
 }
 
+/// u32(unsigned int) format
 pub struct U32;
 impl ProtocolFormatFragment for U32 {
     type Output = u32;
@@ -109,6 +122,7 @@ where
     }
 }
 
+/// Length-encoded integer format
 pub struct LengthEncodedInteger;
 impl ProtocolFormatFragment for LengthEncodedInteger {
     type Output = u64;
@@ -130,6 +144,7 @@ where
     }
 }
 
+/// Length-encoded integer format with prefetched first byte
 pub struct LengthEncodedIntegerAhead(pub u8);
 impl ProtocolFormatFragment for LengthEncodedIntegerAhead {
     type Output = u64;
@@ -151,6 +166,7 @@ where
     }
 }
 
+/// Compile-time determined fixed length byte string format
 pub struct FixedBytes<const L: usize>;
 impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
     type Output = [u8; L];
@@ -173,6 +189,7 @@ impl<'r, const L: usize, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFr
     }
 }
 
+/// Runtime determined fixed length byte string format
 pub struct Bytes(pub usize);
 impl ProtocolFormatFragment for Bytes {
     type Output = Vec<u8>;
@@ -196,6 +213,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> fo
     }
 }
 
+/// Runtime determined fixed length byte string format with prefetched first byte
 pub struct BytesAhead(pub u8, pub usize);
 impl ProtocolFormatFragment for BytesAhead {
     type Output = Vec<u8>;
@@ -220,6 +238,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> fo
     }
 }
 
+/// Null terminated string format
 pub struct NullTerminatedString;
 impl ProtocolFormatFragment for NullTerminatedString {
     type Output = String;
@@ -250,6 +269,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     }
 }
 
+/// Runtime determined fixed length string format
 pub struct FixedLengthString(pub usize);
 impl ProtocolFormatFragment for FixedLengthString {
     type Output = String;
@@ -278,6 +298,7 @@ fn unsafe_recover_string_from_u8s(v: Vec<u8>) -> String {
     unsafe { String::from_utf8_unchecked(v) }
 }
 
+/// Variable string format preceded with Length-Encoded integer as its length
 pub struct LengthEncodedString;
 impl ProtocolFormatFragment for LengthEncodedString {
     type Output = String;
@@ -304,6 +325,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
     }
 }
 
+/// Packet header format
 pub struct PacketHeader;
 impl ProtocolFormatFragment for PacketHeader {
     type Output = super::PacketHeader;
@@ -326,6 +348,7 @@ impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> fo
     }
 }
 
+/// Mapped format; Applies conversion after reading the value
 pub struct Mapped<PF, F>(pub PF, pub F);
 impl<PF, F, R> ProtocolFormatFragment for Mapped<PF, F>
 where
@@ -352,6 +375,7 @@ where
     }
 }
 
+/// AssertEq format; Assertion the value by [`assert_eq!`] after reading
 pub struct AssertEq<PF: ProtocolFormatFragment>(PF, PF::Output);
 impl<PF> ProtocolFormatFragment for AssertEq<PF>
 where
@@ -446,6 +470,17 @@ ProtocolFormatFragmentGroup!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 
 ProtocolFormatFragmentGroup!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9, K: 10, L: 11, M: 12, N: 13, O: 14, P: 15, Q: 16, R: 17, S: 18, T: 19, U: 20, V: 21, W: 22, X: 23, Y: 24);
 ProtocolFormatFragmentGroup!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9, K: 10, L: 11, M: 12, N: 13, O: 14, P: 15, Q: 16, R: 17, S: 18, T: 19, U: 20, V: 21, W: 22, X: 23, Y: 24, Z: 25);
 
+/// Read multiple values synchronously
+///
+/// ## Example
+///
+/// ```
+/// ReadSync!(reader => {
+///     hdr <- PacketHeader,
+///     value1 <- U8,
+///     value2 <- U16
+/// });
+/// ```
 #[macro_export]
 macro_rules! ReadSync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
@@ -455,6 +490,17 @@ macro_rules! ReadSync {
     }
 }
 
+/// Read multiple values asynchronously
+///
+/// ## Example
+///
+/// ```
+/// ReadAsync!(reader => {
+///     hdr <- PacketHeader,
+///     value1 <- U8,
+///     value2 <- U16
+/// });
+/// ```
 #[macro_export]
 macro_rules! ReadAsync {
     ($reader: expr => { $($val: ident <- $fmt: expr),* }) => {
@@ -464,6 +510,17 @@ macro_rules! ReadAsync {
     }
 }
 
+/// Defines Format Fragment structure
+///
+/// ## Example
+///
+/// ```
+/// DefFormatStruct!(pub RawPacketAStruct(RawPacketAStructFormat) {
+///     hdr(PacketHeader) <- format::PacketHeader,
+///     v1(u8) <- format::U8,
+///     v2([u8; 4]) <- format::FixedBytes::<4>
+/// });
+/// ```
 #[macro_export]
 macro_rules! DefFormatStruct {
     ($struct_name: ident($pf_name: ident) { $($val: ident($vty: ty) <- $fmt: expr),* }) => {
@@ -481,6 +538,7 @@ macro_rules! DefFormatStruct {
         $crate::DefProtocolFormat!($vis $pf_name for $struct_name { $($val <- $fmt),* });
     }
 }
+/// Defines Format Fragment implementation for a structure
 #[macro_export]
 macro_rules! DefProtocolFormat {
     ($pf_name: ident for $struct_name: ident { $($val: ident <- $fmt: expr),* }) => {

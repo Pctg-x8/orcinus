@@ -16,6 +16,7 @@ pub use self::clear_text::*;
 pub use self::secure_password::*;
 pub use self::sha256::*;
 
+/// Detailed connection information to perform Authentication flow
 pub struct ConnectionInfo<'s> {
     pub client_capabilities: CapabilityFlags,
     pub max_packet_size: u32,
@@ -25,6 +26,7 @@ pub struct ConnectionInfo<'s> {
     pub database: Option<&'s str>,
 }
 impl ConnectionInfo<'_> {
+    /// Make a handshake response with authentication responses
     #[inline]
     pub fn make_handshake_response<'s>(
         &'s self,
@@ -54,9 +56,12 @@ impl ConnectionInfo<'_> {
     }
 }
 
+/// An Authentication Plugin implementation
 pub trait Authentication {
+    /// Authentication Plugin name
     const NAME: &'static str;
 
+    /// Run Authentication flow
     fn run_sync(
         &self,
         stream: impl Read + Write,
@@ -64,11 +69,14 @@ pub trait Authentication {
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError>;
 }
+/// Asynchronous implementation of Authentication flow
 pub trait AsyncAuthentication<'s, S: 's + Send>: Authentication {
+    /// Future type of Authentication flow
     type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>>
         + Send
         + 's;
 
+    /// Run Authentication flow
     fn run(
         &'s self,
         stream: S,

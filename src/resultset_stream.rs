@@ -1,12 +1,11 @@
+//! Lazily resultset fetching providers.
+
 use std::{
     io::Read,
     task::{Context, Poll},
 };
 
-use futures_util::{
-    future::{BoxFuture, LocalBoxFuture},
-    FutureExt, TryStreamExt,
-};
+use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
 use tokio::io::AsyncRead;
 
 use crate::{
@@ -17,53 +16,73 @@ use crate::{
     CommunicationError,
 };
 
-pub enum TextResultsetIteratorState {
+/// Blocking fetch of resultsets.
+pub enum TextResultsetIterationState {
     AwaitingNext,
     Finished { more_resultset: bool },
 }
-impl TextResultsetIteratorState {
+impl Default for TextResultsetIterationState {
+    fn default() -> Self {
+        Self::INIT
+    }
+}
+impl TextResultsetIterationState {
+    /// Initial State
+    pub const INIT: Self = Self::AwaitingNext;
+
+    /// Fetches next resultset.
     pub fn next(
-        self,
+        &mut self,
         stream: &mut (impl Read + ?Sized),
         client_capability: CapabilityFlags,
-    ) -> (Self, Option<Result<ResultsetRow, CommunicationError>>) {
+    ) -> Option<Result<ResultsetRow, CommunicationError>> {
         match self {
-            Self::Finished { .. } => (self, None),
-            Self::AwaitingNext => match Resultset41::read_packet_sync(stream, client_capability) {
-                Err(e) => (self, Some(Err(e.into()))),
-                Ok(Resultset41::Row(r)) => (self, Some(Ok(r))),
-                Ok(Resultset41::Ok(k)) => (
-                    Self::Finished {
-                        more_resultset: k.status_flags().unwrap_or_default().more_result_exists(),
-                    },
-                    None,
-                ),
-                Ok(Resultset41::EOF(e)) => (
-                    Self::Finished {
-                        more_resultset: e.status_flags.more_result_exists(),
-                    },
-                    None,
-                ),
-                Ok(Resultset41::Err(e)) => (self, Some(Err(e.into()))),
-            },
+            Self::Finished { .. } => None,
+            this @ Self::AwaitingNext => {
+                match Resultset41::read_packet_sync(stream, client_capability) {
+                    Err(e) => Some(Err(e.into())),
+                    Ok(Resultset41::Row(r)) => Some(Ok(r)),
+                    Ok(Resultset41::Ok(k)) => {
+                        *this = Self::Finished {
+                            more_resultset: k
+                                .status_flags()
+                                .unwrap_or_default()
+                                .more_result_exists(),
+                        };
+
+                        None
+                    }
+                    Ok(Resultset41::EOF(e)) => {
+                        *this = Self::Finished {
+                            more_resultset: e.status_flags.more_result_exists(),
+                        };
+
+                        None
+                    }
+                    Ok(Resultset41::Err(e)) => Some(Err(e.into())),
+                }
+            }
         }
     }
 }
+
+/// An iterator wrapping `TextResultsetIterationState`
 pub struct TextResultsetIterator<R>
 where
     R: std::ops::DerefMut,
     R::Target: Read,
 {
-    pub stream: R,
-    pub client_capability: CapabilityFlags,
-    pub columns: Vec<ColumnDefinition41>,
-    pub state: TextResultsetIteratorState,
+    stream: R,
+    client_capability: CapabilityFlags,
+    columns: Vec<ColumnDefinition41>,
+    state: TextResultsetIterationState,
 }
 impl<R> TextResultsetIterator<R>
 where
     R: std::ops::DerefMut,
     R::Target: Read,
 {
+    /// Initializes the iterator, reading first column information packets.
     pub fn new(
         mut stream: R,
         column_count: usize,
@@ -84,17 +103,25 @@ where
             stream,
             client_capability,
             columns,
-            state: TextResultsetIteratorState::AwaitingNext,
+            state: TextResultsetIterationState::INIT,
         })
     }
 
+    /// Column informations of this resultset.
+    #[inline]
+    pub fn columns(&self) -> &[ColumnDefinition41] {
+        &self.columns
+    }
+
+    /// Returns whether last operation has more resultsets after this iteration.
     pub fn has_more_resultset(&self) -> bool {
         match self.state {
-            TextResultsetIteratorState::Finished { more_resultset } => more_resultset,
+            TextResultsetIterationState::Finished { more_resultset } => more_resultset,
             _ => false,
         }
     }
 
+    /// Discards all resultset rows.
     pub fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
         while let Some(r) = self.next() {
             let _ = r?;
@@ -112,28 +139,128 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let (new_state, res) =
-            unsafe { std::ptr::read(&self.state) }.next(&mut *self.stream, self.client_capability);
-        self.state = new_state;
-        res
+        self.state.next(&mut *self.stream, self.client_capability)
     }
 }
 
+/// Non-blocking fetch of resultsets.
 pub enum TextResultsetStreamState<'a> {
     Initialized,
     PendingReadOp(BoxFuture<'a, std::io::Result<Resultset41>>),
     Finish { more_resultset: bool },
 }
+impl Default for TextResultsetStreamState<'_> {
+    fn default() -> Self {
+        Self::INIT
+    }
+}
+impl<'a> TextResultsetStreamState<'a> {
+    /// Initial State
+    pub const INIT: Self = Self::Initialized;
+
+    /// Fetches next resultset.
+    pub fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        stream: &'a mut (impl AsyncRead + Send + Sync + Unpin + ?Sized),
+        client_capabilities: CapabilityFlags,
+    ) -> Poll<Option<Result<ResultsetRow, CommunicationError>>> {
+        match self {
+            Self::Finish { .. } => Poll::Ready(None),
+            this @ Self::Initialized => {
+                let mut f = Resultset41::read_packet(stream, client_capabilities).boxed();
+
+                match f.poll_unpin(cx) {
+                    Poll::Pending => {
+                        *this = Self::PendingReadOp(f);
+
+                        Poll::Pending
+                    }
+                    Poll::Ready(Err(e)) => {
+                        *this = Self::Initialized;
+
+                        Poll::Ready(Some(Err(e.into())))
+                    }
+                    Poll::Ready(Ok(Resultset41::Row(r))) => {
+                        *this = Self::Initialized;
+                        Poll::Ready(Some(Ok(r)))
+                    }
+                    Poll::Ready(Ok(Resultset41::Ok(o))) => {
+                        *this = Self::Finish {
+                            more_resultset: o
+                                .status_flags()
+                                .unwrap_or_default()
+                                .more_result_exists(),
+                        };
+
+                        Poll::Ready(None)
+                    }
+                    Poll::Ready(Ok(Resultset41::EOF(e))) => {
+                        *this = Self::Finish {
+                            more_resultset: e.status_flags.more_result_exists(),
+                        };
+
+                        Poll::Ready(None)
+                    }
+                    Poll::Ready(Ok(Resultset41::Err(e))) => {
+                        *this = Self::Finish {
+                            more_resultset: false,
+                        };
+
+                        Poll::Ready(Some(Err(e.into())))
+                    }
+                }
+            }
+            Self::PendingReadOp(ref mut op) => match op.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(e)) => {
+                    *self = Self::Initialized;
+
+                    Poll::Ready(Some(Err(e.into())))
+                }
+                Poll::Ready(Ok(Resultset41::Row(r))) => {
+                    *self = Self::Initialized;
+
+                    Poll::Ready(Some(Ok(r)))
+                }
+                Poll::Ready(Ok(Resultset41::Ok(o))) => {
+                    *self = Self::Finish {
+                        more_resultset: o.status_flags().unwrap_or_default().more_result_exists(),
+                    };
+
+                    Poll::Ready(None)
+                }
+                Poll::Ready(Ok(Resultset41::EOF(e))) => {
+                    *self = Self::Finish {
+                        more_resultset: e.status_flags.more_result_exists(),
+                    };
+
+                    Poll::Ready(None)
+                }
+                Poll::Ready(Ok(Resultset41::Err(e))) => {
+                    *self = Self::Finish {
+                        more_resultset: false,
+                    };
+
+                    Poll::Ready(Some(Err(e.into())))
+                }
+            },
+        }
+    }
+}
+
+/// An stream wrapping `TextResultsetStreamState`
 pub struct TextResultsetStream<'s, R: ?Sized> {
-    pub stream: &'s mut R,
-    pub client_capability: CapabilityFlags,
-    pub columns: Vec<ColumnDefinition41>,
-    pub state: TextResultsetStreamState<'s>,
+    stream: &'s mut R,
+    client_capability: CapabilityFlags,
+    columns: Vec<ColumnDefinition41>,
+    state: TextResultsetStreamState<'s>,
 }
 impl<'s, R> TextResultsetStream<'s, R>
 where
     R: AsyncRead + Send + Sync + Unpin + ?Sized,
 {
+    /// Initializes the iterator, reading first column information packets.
     pub async fn new(
         mut stream: &'s mut R,
         column_count: usize,
@@ -161,6 +288,7 @@ where
         })
     }
 
+    /// Discards all resultset rows.
     pub async fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
         while let Some(_) = self.try_next().await? {}
 
@@ -168,6 +296,21 @@ where
     }
 }
 impl<R: ?Sized> TextResultsetStream<'_, R> {
+    /// Column informations of this resultset.
+    #[inline]
+    pub fn columns(&self) -> &[ColumnDefinition41] {
+        &self.columns
+    }
+
+    /// Types of column.
+    ///
+    /// This function does not check whether returned type byte is valid.
+    #[inline]
+    pub unsafe fn column_types_unchecked<'s>(&'s self) -> impl Iterator<Item = ColumnType> + 's {
+        self.columns.iter().map(|c| c.type_unchecked())
+    }
+
+    /// Returns whether last operation has more resultsets after this iteration.
     pub fn has_more_resultset(&self) -> Option<bool> {
         match self.state {
             TextResultsetStreamState::Finish { more_resultset } => Some(more_resultset),
@@ -187,135 +330,82 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if let TextResultsetStreamState::Finish { .. } = this.state {
-            std::task::Poll::Ready(None)
-        } else {
-            match std::mem::replace(&mut this.state, TextResultsetStreamState::Initialized) {
-                TextResultsetStreamState::PendingReadOp(mut op) => match op.poll_unpin(cx) {
-                    std::task::Poll::Pending => {
-                        this.state = TextResultsetStreamState::PendingReadOp(op);
-                        std::task::Poll::Pending
-                    }
-                    std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Some(Err(e.into()))),
-                    std::task::Poll::Ready(Ok(Resultset41::Row(r))) => {
-                        std::task::Poll::Ready(Some(Ok(r)))
-                    }
-                    std::task::Poll::Ready(Ok(Resultset41::Ok(o))) => {
-                        this.state = TextResultsetStreamState::Finish {
-                            more_resultset: o
-                                .status_flags()
-                                .unwrap_or_default()
-                                .more_result_exists(),
-                        };
-                        std::task::Poll::Ready(None)
-                    }
-                    std::task::Poll::Ready(Ok(Resultset41::EOF(o))) => {
-                        this.state = TextResultsetStreamState::Finish {
-                            more_resultset: o.status_flags.more_result_exists(),
-                        };
-                        std::task::Poll::Ready(None)
-                    }
-                    std::task::Poll::Ready(Ok(Resultset41::Err(e))) => {
-                        std::task::Poll::Ready(Some(Err(e.into())))
-                    }
-                },
-                TextResultsetStreamState::Initialized => {
-                    let mut f = Resultset41::read_packet(
-                        unsafe { &mut *(this.stream as *mut _) as &'s mut _ },
-                        this.client_capability,
-                    )
-                    .boxed();
-
-                    match f.poll_unpin(cx) {
-                        std::task::Poll::Pending => {
-                            this.state = TextResultsetStreamState::PendingReadOp(f);
-                            std::task::Poll::Pending
-                        }
-                        std::task::Poll::Ready(Err(e)) => {
-                            std::task::Poll::Ready(Some(Err(e.into())))
-                        }
-                        std::task::Poll::Ready(Ok(Resultset41::Row(r))) => {
-                            std::task::Poll::Ready(Some(Ok(r)))
-                        }
-                        std::task::Poll::Ready(Ok(Resultset41::Ok(o))) => {
-                            this.state = TextResultsetStreamState::Finish {
-                                more_resultset: o
-                                    .status_flags()
-                                    .unwrap_or_default()
-                                    .more_result_exists(),
-                            };
-                            std::task::Poll::Ready(None)
-                        }
-                        std::task::Poll::Ready(Ok(Resultset41::EOF(o))) => {
-                            this.state = TextResultsetStreamState::Finish {
-                                more_resultset: o.status_flags.more_result_exists(),
-                            };
-                            std::task::Poll::Ready(None)
-                        }
-                        std::task::Poll::Ready(Ok(Resultset41::Err(e))) => {
-                            std::task::Poll::Ready(Some(Err(e.into())))
-                        }
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
+        this.state.poll_next(
+            cx,
+            unsafe { &mut *(this.stream as *mut _) as &'s mut _ },
+            this.client_capability,
+        )
     }
 }
 
-pub enum BinaryResultsetIteratorState {
+/// Blocking fetch of binary protocol resultsets.
+pub enum BinaryResultsetIterationState {
     AwaitingNext,
     Finished { more_resultset: bool },
 }
-impl BinaryResultsetIteratorState {
+impl Default for BinaryResultsetIterationState {
+    fn default() -> Self {
+        Self::INIT
+    }
+}
+impl BinaryResultsetIterationState {
+    /// Initial State
+    pub const INIT: Self = Self::AwaitingNext;
+
+    /// Fetches next resultset.
     pub fn next(
-        self,
+        &mut self,
         stream: &mut (impl Read + ?Sized),
         client_capability: CapabilityFlags,
         column_count: usize,
-    ) -> (Self, Option<Result<BinaryResultsetRow, CommunicationError>>) {
+    ) -> Option<Result<BinaryResultsetRow, CommunicationError>> {
         match self {
-            Self::Finished { .. } => (self, None),
-            Self::AwaitingNext => {
+            Self::Finished { .. } => None,
+            this @ Self::AwaitingNext => {
                 match BinaryResultset41::read_packet_sync(stream, client_capability, column_count) {
-                    Err(e) => (self, Some(Err(e.into()))),
-                    Ok(BinaryResultset41::Row(r)) => (self, Some(Ok(r))),
-                    Ok(BinaryResultset41::Ok(k)) => (
-                        Self::Finished {
+                    Err(e) => Some(Err(e.into())),
+                    Ok(BinaryResultset41::Row(r)) => Some(Ok(r)),
+                    Ok(BinaryResultset41::Ok(k)) => {
+                        *this = Self::Finished {
                             more_resultset: k
                                 .status_flags()
                                 .unwrap_or_default()
                                 .more_result_exists(),
-                        },
-                        None,
-                    ),
-                    Ok(BinaryResultset41::EOF(e)) => (
-                        Self::Finished {
+                        };
+
+                        None
+                    }
+                    Ok(BinaryResultset41::EOF(e)) => {
+                        *this = Self::Finished {
                             more_resultset: e.status_flags.more_result_exists(),
-                        },
-                        None,
-                    ),
-                    Ok(BinaryResultset41::Err(e)) => (self, Some(Err(e.into()))),
+                        };
+
+                        None
+                    }
+                    Ok(BinaryResultset41::Err(e)) => Some(Err(e.into())),
                 }
             }
         }
     }
 }
+
+/// An iterator wrapping `BinaryResultsetIterationState`
 pub struct BinaryResultsetIterator<R>
 where
     R: std::ops::DerefMut,
     R::Target: Read,
 {
-    pub stream: R,
-    pub client_capability: CapabilityFlags,
-    pub columns: Vec<ColumnDefinition41>,
-    pub state: BinaryResultsetIteratorState,
+    stream: R,
+    client_capability: CapabilityFlags,
+    columns: Vec<ColumnDefinition41>,
+    state: BinaryResultsetIterationState,
 }
 impl<R> BinaryResultsetIterator<R>
 where
     R: std::ops::DerefMut,
     R::Target: Read,
 {
+    /// Initializes the iterator, reading first column information packets.
     pub fn new(
         mut stream: R,
         column_count: usize,
@@ -336,21 +426,33 @@ where
             stream,
             client_capability,
             columns,
-            state: BinaryResultsetIteratorState::AwaitingNext,
+            state: BinaryResultsetIterationState::INIT,
         })
     }
 
-    pub fn has_more_resultset(&self) -> bool {
-        match self.state {
-            BinaryResultsetIteratorState::Finished { more_resultset } => more_resultset,
-            _ => false,
-        }
+    /// Column informations of this resultset.
+    #[inline]
+    pub fn columns(&self) -> &[ColumnDefinition41] {
+        &self.columns
     }
 
+    /// Types of column.
+    ///
+    /// This function does not check whether returned type byte is valid.
+    #[inline]
     pub unsafe fn column_types_unchecked<'s>(&'s self) -> impl Iterator<Item = ColumnType> + 's {
         self.columns.iter().map(|c| c.type_unchecked())
     }
 
+    /// Returns whether last operation has more resultsets after this iteration.
+    pub fn has_more_resultset(&self) -> bool {
+        match self.state {
+            BinaryResultsetIterationState::Finished { more_resultset } => more_resultset,
+            _ => false,
+        }
+    }
+
+    /// Discards all resultset rows.
     pub fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
         while let Some(r) = self.next() {
             let _ = r?;
@@ -368,106 +470,135 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let (new_state, res) = unsafe { std::ptr::read(&self.state) }.next(
+        self.state.next(
             &mut *self.stream,
             self.client_capability,
             self.columns.len(),
-        );
-        self.state = new_state;
-        res
+        )
     }
 }
 
+/// Non-blocking fetch of binary protocol resultsets.
 pub enum BinaryResultsetStreamState<'a> {
     Initialized,
-    PendingReadOp(LocalBoxFuture<'a, std::io::Result<BinaryResultset41>>),
+    PendingReadOp(BoxFuture<'a, std::io::Result<BinaryResultset41>>),
     Finish { more_resultset: bool },
 }
+impl Default for BinaryResultsetStreamState<'_> {
+    fn default() -> Self {
+        Self::INIT
+    }
+}
 impl<'a> BinaryResultsetStreamState<'a> {
+    /// Initial State
+    pub const INIT: Self = Self::Initialized;
+
+    /// Fetches next resultset.
     pub fn poll_next(
-        self,
+        &mut self,
         cx: &mut Context<'_>,
         stream: &'a mut (impl AsyncRead + Send + Sync + Unpin + ?Sized),
         client_capabilities: CapabilityFlags,
         column_count: usize,
-    ) -> (
-        Self,
-        Poll<Option<Result<BinaryResultsetRow, CommunicationError>>>,
-    ) {
+    ) -> Poll<Option<Result<BinaryResultsetRow, CommunicationError>>> {
         match self {
-            Self::Finish { more_resultset } => (Self::Finish { more_resultset }, Poll::Ready(None)),
-            Self::Initialized => {
+            Self::Finish { .. } => Poll::Ready(None),
+            this @ Self::Initialized => {
                 let mut f =
                     BinaryResultset41::read_packet(stream, client_capabilities, column_count)
-                        .boxed_local();
+                        .boxed();
 
                 match f.poll_unpin(cx) {
-                    Poll::Pending => (Self::PendingReadOp(f), Poll::Pending),
-                    Poll::Ready(Err(e)) => (Self::Initialized, Poll::Ready(Some(Err(e.into())))),
-                    Poll::Ready(Ok(BinaryResultset41::Row(r))) => {
-                        (Self::Initialized, Poll::Ready(Some(Ok(r))))
+                    Poll::Pending => {
+                        *this = Self::PendingReadOp(f);
+
+                        Poll::Pending
                     }
-                    Poll::Ready(Ok(BinaryResultset41::Ok(o))) => (
-                        Self::Finish {
+                    Poll::Ready(Err(e)) => {
+                        *this = Self::Initialized;
+
+                        Poll::Ready(Some(Err(e.into())))
+                    }
+                    Poll::Ready(Ok(BinaryResultset41::Row(r))) => {
+                        *this = Self::Initialized;
+                        Poll::Ready(Some(Ok(r)))
+                    }
+                    Poll::Ready(Ok(BinaryResultset41::Ok(o))) => {
+                        *this = Self::Finish {
                             more_resultset: o
                                 .status_flags()
                                 .unwrap_or_default()
                                 .more_result_exists(),
-                        },
-                        Poll::Ready(None),
-                    ),
-                    Poll::Ready(Ok(BinaryResultset41::EOF(e))) => (
-                        Self::Finish {
+                        };
+
+                        Poll::Ready(None)
+                    }
+                    Poll::Ready(Ok(BinaryResultset41::EOF(e))) => {
+                        *this = Self::Finish {
                             more_resultset: e.status_flags.more_result_exists(),
-                        },
-                        Poll::Ready(None),
-                    ),
-                    Poll::Ready(Ok(BinaryResultset41::Err(e))) => (
-                        Self::Finish {
+                        };
+
+                        Poll::Ready(None)
+                    }
+                    Poll::Ready(Ok(BinaryResultset41::Err(e))) => {
+                        *this = Self::Finish {
                             more_resultset: false,
-                        },
-                        Poll::Ready(Some(Err(e.into()))),
-                    ),
+                        };
+
+                        Poll::Ready(Some(Err(e.into())))
+                    }
                 }
             }
-            Self::PendingReadOp(mut op) => match op.poll_unpin(cx) {
-                Poll::Pending => (Self::PendingReadOp(op), Poll::Pending),
-                Poll::Ready(Err(e)) => (Self::Initialized, Poll::Ready(Some(Err(e.into())))),
-                Poll::Ready(Ok(BinaryResultset41::Row(r))) => {
-                    (Self::Initialized, Poll::Ready(Some(Ok(r))))
+            Self::PendingReadOp(ref mut op) => match op.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(e)) => {
+                    *self = Self::Initialized;
+
+                    Poll::Ready(Some(Err(e.into())))
                 }
-                Poll::Ready(Ok(BinaryResultset41::Ok(o))) => (
-                    Self::Finish {
+                Poll::Ready(Ok(BinaryResultset41::Row(r))) => {
+                    *self = Self::Initialized;
+
+                    Poll::Ready(Some(Ok(r)))
+                }
+                Poll::Ready(Ok(BinaryResultset41::Ok(o))) => {
+                    *self = Self::Finish {
                         more_resultset: o.status_flags().unwrap_or_default().more_result_exists(),
-                    },
-                    Poll::Ready(None),
-                ),
-                Poll::Ready(Ok(BinaryResultset41::EOF(e))) => (
-                    Self::Finish {
+                    };
+
+                    Poll::Ready(None)
+                }
+                Poll::Ready(Ok(BinaryResultset41::EOF(e))) => {
+                    *self = Self::Finish {
                         more_resultset: e.status_flags.more_result_exists(),
-                    },
-                    Poll::Ready(None),
-                ),
-                Poll::Ready(Ok(BinaryResultset41::Err(e))) => (
-                    Self::Finish {
+                    };
+
+                    Poll::Ready(None)
+                }
+                Poll::Ready(Ok(BinaryResultset41::Err(e))) => {
+                    *self = Self::Finish {
                         more_resultset: false,
-                    },
-                    Poll::Ready(Some(Err(e.into()))),
-                ),
+                    };
+
+                    Poll::Ready(Some(Err(e.into())))
+                }
             },
         }
     }
 }
+
+/// An stream wrapping `BinaryResultsetStreamState`
 pub struct BinaryResultsetStream<'s, R: ?Sized> {
-    pub stream: &'s mut R,
-    pub client_capability: CapabilityFlags,
-    pub columns: Vec<ColumnDefinition41>,
-    pub state: BinaryResultsetStreamState<'s>,
+    stream: &'s mut R,
+    client_capability: CapabilityFlags,
+    columns: Vec<ColumnDefinition41>,
+    state: BinaryResultsetStreamState<'s>,
 }
 impl<'s, R> BinaryResultsetStream<'s, R>
 where
     R: AsyncRead + Send + Sync + Unpin + ?Sized,
 {
+    /// Initializes the iterator, reading first column information packets.
     pub async fn new(
         mut stream: &'s mut R,
         client_capability: CapabilityFlags,
@@ -487,10 +618,7 @@ where
         })
     }
 
-    pub unsafe fn column_types_unchecked(&'s self) -> impl Iterator<Item = ColumnType> + 's {
-        self.columns.iter().map(|c| c.type_unchecked())
-    }
-
+    /// Discards all resultset rows.
     pub async fn drop_all_rows(&mut self) -> Result<(), CommunicationError> {
         while let Some(_) = self.try_next().await? {}
 
@@ -498,6 +626,21 @@ where
     }
 }
 impl<R: ?Sized> BinaryResultsetStream<'_, R> {
+    /// Column informations of this resultset.
+    #[inline]
+    pub fn columns(&self) -> &[ColumnDefinition41] {
+        &self.columns
+    }
+
+    /// Types of column.
+    ///
+    /// This function does not check whether returned type byte is valid.
+    #[inline]
+    pub unsafe fn column_types_unchecked<'s>(&'s self) -> impl Iterator<Item = ColumnType> + 's {
+        self.columns.iter().map(|c| c.type_unchecked())
+    }
+
+    /// Returns whether last operation has more resultsets after this iteration.
     pub fn has_more_resultset(&self) -> Option<bool> {
         match self.state {
             BinaryResultsetStreamState::Finish { more_resultset } => Some(more_resultset),
@@ -518,13 +661,11 @@ where
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        let (new_state, poll_result) = unsafe { std::ptr::read(&this.state) }.poll_next(
+        this.state.poll_next(
             cx,
             unsafe { &mut *(this.stream as *mut _) as &'s mut _ },
             this.client_capability,
             this.columns.len(),
-        );
-        this.state = new_state;
-        poll_result
+        )
     }
 }

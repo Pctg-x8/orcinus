@@ -14,9 +14,17 @@ use crate::{
     CommunicationError,
 };
 
+/// SHA256 Authentication(`"sha256_password"`)
+///
+/// Note: This authentication is currently not implemented.
 pub struct SHA256<'k> {
+    /// Server pubkey(if known) to encode scrambled password
+    ///
+    /// If `None`, it will be obtained from server in authentication flow
     pub server_spki_der: Option<&'k [u8]>,
+    /// first 8 bytes of scramble data
     pub scramble_buffer_1: &'k [u8],
+    /// rest bytes of scramble data
     pub scramble_buffer_2: &'k [u8],
 }
 impl super::Authentication for SHA256<'_> {
@@ -47,6 +55,7 @@ where
     }
 }
 
+/// Generates an auth_response for first response in `caching_sha2_password` authentication
 pub fn caching_sha2_gen_fast_auth_response(password: &str, salt1: &[u8], salt2: &[u8]) -> Vec<u8> {
     // xor(sha256(password), sha256(sha256(sha256(password)) + salt1 + salt2))
     // ref: https://dev.mysql.com/blog-archive/mysql-8-0-4-new-default-authentication-plugin-caching_sha2_password/
@@ -72,6 +81,9 @@ pub fn caching_sha2_gen_fast_auth_response(password: &str, salt1: &[u8], salt2: 
 }
 
 #[repr(transparent)]
+/// Cached SHA2 Authentication(`"caching_sha2_password"`)
+///
+/// Encloses SHA256 Authentication because they use same data
 pub struct CachedSHA256<'k>(pub SHA256<'k>);
 impl super::Authentication for CachedSHA256<'_> {
     const NAME: &'static str = "caching_sha2_password";
