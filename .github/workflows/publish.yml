@@ -17,7 +17,7 @@ jobs:
         run: pip install toml-cli
       - id: version
         name: Read release version
-        run: "::set-output name=version::$(toml get --toml-path ./Cargo.toml package.version)"
+        run: "echo \"::set-output name=version::$(toml get --toml-path ./Cargo.toml package.version)\""
       - name: Publish to crates.io
         uses: "actions-rs/cargo@v1"
         with:

@@ -31,7 +31,7 @@ let readVersionStep =
       , name = "Read release version"
       , id = Some "version"
       , run = Some
-          "::set-output name=version::\$(toml get --toml-path ./Cargo.toml package.version)"
+          "echo \"::set-output name=version::\$(toml get --toml-path ./Cargo.toml package.version)\""
       }
 
 let publishStep =
