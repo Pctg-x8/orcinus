@@ -1,8 +1,14 @@
 let GHA =
       https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/schema.dhall
 
-let ProvidedSteps =
-      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps.dhall
+let checkout =
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps/actions/checkout.dhall
+
+let setupRust =
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps/actions-rs/toolchain.dhall
+
+let runCargo =
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps/actions-rs/cargo.dhall
 
 let Text/concatSep = https://prelude.dhall-lang.org/Text/concatSep
 
@@ -13,13 +19,6 @@ let exampleDBService =
       , env = Some (toMap { MYSQL_ROOT_PASSWORD = "root" })
       , options = Some
           "--health-cmd \"mysqladmin ping\" --health-interval 10s --health-timeout 5s --health-retries 5"
-      }
-
-let installRustStep =
-      GHA.Step::{
-      , name = "Install Rust"
-      , uses = Some "actions-rs/toolchain@v1"
-      , `with` = Some (toMap { toolchain = "stable" })
       }
 
 let setupExampleDBStep =
@@ -36,10 +35,11 @@ let runExampleStep =
               then  ""
               else  "--features ${Text/concatSep "," features}"
 
-        in  GHA.Step::{
-            , name = "Run Example(${name})"
-            , run = Some "cargo run --example ${name} ${featuresOption}"
-            }
+        in  runCargo.step
+              runCargo.Params::{
+              , command = "run"
+              , args = Some "--example ${name} ${featuresOption}"
+              }
 
 in  GHA.Workflow::{
     , name = Some "Example Test"
@@ -58,8 +58,8 @@ in  GHA.Workflow::{
           , runs-on = GHA.RunnerPlatform.ubuntu-latest
           , services = Some (toMap { db = exampleDBService })
           , steps =
-            [ ProvidedSteps.checkoutStep ProvidedSteps.CheckoutParams::{=}
-            , installRustStep
+            [ checkout.step checkout.Params::{=}
+            , setupRust.step setupRust.Params::{ toolchain = Some "stable" }
             , setupExampleDBStep
             , runExampleStep "raw_protocols" ([] : List Text)
             , runExampleStep "run" ([] : List Text)
