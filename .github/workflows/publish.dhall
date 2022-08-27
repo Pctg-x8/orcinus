@@ -9,7 +9,7 @@ let PublishToken = GHA.mkExpression "secrets.PUBLISH_TOKEN"
 let setupPythonStep =
       GHA.Step::{
       , name = "Setup python for tools"
-      , uses = Some "actions/setup-python@4"
+      , uses = Some "actions/setup-python@v4"
       , `with` = Some (toMap { python-version = "3.10" })
       }
 
