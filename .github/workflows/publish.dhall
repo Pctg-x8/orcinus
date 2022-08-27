@@ -10,7 +10,8 @@ let setupPythonStep =
       GHA.Step::{
       , name = "Setup python for tools"
       , uses = Some "actions/setup-python@v4"
-      , `with` = Some (toMap { python-version = "3.10" })
+      , `with` = Some
+          (toMap { python-version = GHA.WithParameterType.Text "3.10" })
       }
 
 let setupTomlReaderStep =
@@ -23,7 +24,8 @@ let installRustStep =
       GHA.Step::{
       , name = "Install Rust"
       , uses = Some "actions-rs/toolchain@v1"
-      , `with` = Some (toMap { toolchain = "stable" })
+      , `with` = Some
+          (toMap { toolchain = GHA.WithParameterType.Text "stable" })
       }
 
 let readVersionStep =
@@ -31,7 +33,7 @@ let readVersionStep =
       , name = "Read release version"
       , id = Some "version"
       , run = Some
-          "::set-output name=version::\$(toml get --toml-path ./Cargo.toml package.version)"
+          "echo \"::set-output name=version::\$(toml get --toml-path ./Cargo.toml package.version)\""
       }
 
 let publishStep =
@@ -39,23 +41,11 @@ let publishStep =
       , name = "Publish to crates.io"
       , uses = Some "actions-rs/cargo@v1"
       , `with` = Some
-          (toMap { command = "publish", args = "--token ${PublishToken}" })
-      }
-
-let githubReleaseStep =
-      GHA.Step::{
-      , name = "Make a release"
-      , uses = Some "actions/create-release@v1"
-      , `with` = Some
           ( toMap
-              { draft = "false"
-              , prerelease = "false"
-              , release_name = GHA.mkExpression "steps.version.outputs.version"
-              , tag_name = GHA.mkExpression "github.ref"
-              , body = ""
+              { command = GHA.WithParameterType.Text "publish"
+              , args = GHA.WithParameterType.Text "--token ${PublishToken}"
               }
           )
-      , env = Some (toMap { GITHUB_TOKEN = GHA.mkExpression "github.token" })
       }
 
 in  GHA.Workflow::{
@@ -76,7 +66,15 @@ in  GHA.Workflow::{
             , setupTomlReaderStep
             , readVersionStep
             , publishStep
-            , githubReleaseStep
+            , ProvidedSteps.createReleaseStep
+                ProvidedSteps.CreateReleaseParams::{
+                , tag_name = GHA.mkExpression "steps.version.outputs.version"
+                , release_name =
+                    GHA.mkExpression "steps.version.outputs.version"
+                , body = ProvidedSteps.CreateReleaseBody.Text ""
+                , draft = Some False
+                , prerelease = Some False
+                }
             ]
           }
         }
