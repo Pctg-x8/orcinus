@@ -1,8 +1,8 @@
 let GHA =
-      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/test-with-typing/schema.dhall
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/schema.dhall
 
 let ProvidedSteps =
-      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/test-with-typing/ProvidedSteps.dhall
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps.dhall
 
 let PublishToken = GHA.mkExpression "secrets.PUBLISH_TOKEN"
 
@@ -48,25 +48,6 @@ let publishStep =
           )
       }
 
-let githubReleaseStep =
-      GHA.Step::{
-      , name = "Make a release"
-      , uses = Some "actions/create-release@v1"
-      , `with` = Some
-          ( toMap
-              { draft = GHA.WithParameterType.Boolean False
-              , prerelease = GHA.WithParameterType.Boolean False
-              , release_name =
-                  GHA.WithParameterType.Text
-                    (GHA.mkExpression "steps.version.outputs.version")
-              , tag_name =
-                  GHA.WithParameterType.Text (GHA.mkExpression "github.ref")
-              , body = GHA.WithParameterType.Text ""
-              }
-          )
-      , env = Some (toMap { GITHUB_TOKEN = GHA.mkExpression "github.token" })
-      }
-
 in  GHA.Workflow::{
     , name = Some "Publish to crates.io"
     , on =
@@ -85,7 +66,15 @@ in  GHA.Workflow::{
             , setupTomlReaderStep
             , readVersionStep
             , publishStep
-            , githubReleaseStep
+            , ProvidedSteps.createReleaseStep
+                ProvidedSteps.CreateReleaseParams::{
+                , tag_name = GHA.mkExpression "steps.version.outputs.version"
+                , release_name =
+                    GHA.mkExpression "steps.version.outputs.version"
+                , body = ProvidedSteps.CreateReleaseBody.Text ""
+                , draft = Some False
+                , prerelease = Some False
+                }
             ]
           }
         }
