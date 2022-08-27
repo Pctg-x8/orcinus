@@ -13,9 +13,7 @@ pub struct MysqlTcpConnection<'s, A: ToSocketAddrs> {
     pub con_info: super::ConnectInfo<'s>,
 }
 #[async_trait]
-impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection
-    for MysqlTcpConnection<'static, A>
-{
+impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection for MysqlTcpConnection<'static, A> {
     type Connection = super::Client<tokio::net::TcpStream>;
     type Error = super::CommunicationError;
 
@@ -62,9 +60,7 @@ pub struct MysqlConnection<'s, A: ToSocketAddrs> {
 }
 #[cfg(feature = "autossl")]
 #[async_trait]
-impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection
-    for MysqlConnection<'static, A>
-{
+impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection for MysqlConnection<'static, A> {
     type Connection = super::autossl_client::Client;
     type Error = super::autossl_client::ConnectionError;
 

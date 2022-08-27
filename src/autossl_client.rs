@@ -12,11 +12,11 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::{
     authentication::{self, AsyncAuthentication, Authentication},
     protos::{
-        request, write_packet, write_packet_sync, AsyncReceivePacket, CapabilityFlags, ErrPacket,
-        Handshake, QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest,
+        request, write_packet, write_packet_sync, AsyncReceivePacket, CapabilityFlags, ErrPacket, Handshake,
+        QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest,
     },
-    BinaryResultsetIterator, BinaryResultsetStream, CommunicationError, GenericClient,
-    SharedClient, TextResultsetIterator, TextResultsetStream,
+    BinaryResultsetIterator, BinaryResultsetStream, CommunicationError, GenericClient, SharedClient,
+    TextResultsetIterator, TextResultsetStream,
 };
 
 pub struct SSLConnectInfo<'s> {
@@ -82,8 +82,7 @@ impl BlockingClient {
         connect_info: &SSLConnectInfo,
     ) -> Result<Self, ConnectionError> {
         let stream = std::net::TcpStream::connect(addr)?;
-        let mut stream =
-            BufStream::new(Box::new(stream) as Box<dyn BidirectionalStream + Send + Sync>);
+        let mut stream = BufStream::new(Box::new(stream) as Box<dyn BidirectionalStream + Send + Sync>);
         let (server_handshake, mut sequence_id) = Handshake::read_packet_sync(&mut stream)?;
 
         let server_caps = match server_handshake {
@@ -128,8 +127,7 @@ impl BlockingClient {
                     Err(e) => panic!("Failed to unwrap bufreaders: {:?}", e.error()),
                 },
             );
-            stream =
-                BufStream::new(Box::new(tls_stream) as Box<dyn BidirectionalStream + Send + Sync>);
+            stream = BufStream::new(Box::new(tls_stream) as Box<dyn BidirectionalStream + Send + Sync>);
         } else {
             capability = required_caps & server_caps;
         }
@@ -200,9 +198,9 @@ impl BlockingClient {
         query: &str,
     ) -> Result<TextResultsetIterator<&'s mut DynamicStream>, CommunicationError> {
         match self.query(query)? {
-            QueryCommandResponse::Resultset { column_count } => self
-                .text_resultset_iterator(column_count as _)
-                .map_err(From::from),
+            QueryCommandResponse::Resultset { column_count } => {
+                self.text_resultset_iterator(column_count as _).map_err(From::from)
+            }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
             QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
             QueryCommandResponse::LocalInfileRequest { filename } => {
@@ -365,10 +363,9 @@ impl Client {
         query: &'s str,
     ) -> Result<TextResultsetStream<'s, AsyncDynamicStream>, CommunicationError> {
         match self.query(query).await? {
-            QueryCommandResponse::Resultset { column_count } => self
-                .text_resultset_stream(column_count as _)
-                .await
-                .map_err(From::from),
+            QueryCommandResponse::Resultset { column_count } => {
+                self.text_resultset_stream(column_count as _).await.map_err(From::from)
+            }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
             QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
             QueryCommandResponse::LocalInfileRequest { filename } => {

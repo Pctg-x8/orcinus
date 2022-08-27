@@ -127,9 +127,7 @@ where
                 &mut this.extra_read_bytes,
             )) {
                 Err(e) => Poll::Ready(Err(e)),
-                _ => Poll::Ready(Ok(
-                    u16::from_le_bytes([this.extra_bytes[0], this.extra_bytes[1]]) as _,
-                )),
+                _ => Poll::Ready(Ok(u16::from_le_bytes([this.extra_bytes[0], this.extra_bytes[1]]) as _)),
             },
             0xfd => match ready!(poll_read_until(
                 &mut this.reader,
@@ -180,12 +178,7 @@ impl<const N: usize, R: AsyncRead + Unpin> Future for ReadFixedBytesF<N, R> {
         let this = self.get_mut();
         let buf = this.buf.as_mut().expect("Future was resolved");
 
-        match ready!(poll_read_until(
-            &mut this.reader,
-            cx,
-            buf,
-            &mut this.read_bytes
-        )) {
+        match ready!(poll_read_until(&mut this.reader, cx, buf, &mut this.read_bytes)) {
             Err(e) => Poll::Ready(Err(e)),
             _ => Poll::Ready(Ok(unsafe { this.buf.take().unwrap_unchecked() })),
         }
@@ -280,10 +273,7 @@ where
 
                     if filled[0] == 0 {
                         return Poll::Ready(Ok(unsafe {
-                            String::from_utf8_unchecked(std::mem::replace(
-                                &mut this.collected,
-                                Vec::new(),
-                            ))
+                            String::from_utf8_unchecked(std::mem::replace(&mut this.collected, Vec::new()))
                         }));
                     } else {
                         this.collected.push(filled[0]);

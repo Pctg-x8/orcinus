@@ -49,14 +49,10 @@ impl format::ProtocolFormatFragment for HandshakeV10ShortFormat {
     type Output = HandshakeV10Short;
 
     fn read_sync(self, reader: impl Read) -> std::io::Result<Self::Output> {
-        RawHandshakeV10ShortProtocolFormat
-            .read_sync(reader)
-            .map(From::from)
+        RawHandshakeV10ShortProtocolFormat.read_sync(reader).map(From::from)
     }
 }
-impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'r, R>
-    for HandshakeV10ShortFormat
-{
+impl<'r, R: 'r + AsyncRead + Send + Unpin> format::AsyncProtocolFormatFragment<'r, R> for HandshakeV10ShortFormat {
     type ReaderF = futures_util::future::MapOk<
         <RawHandshakeV10ShortProtocolFormat as format::AsyncProtocolFormatFragment<'r, R>>::ReaderF,
         fn(RawHandshakeV10Short) -> HandshakeV10Short,
@@ -96,9 +92,7 @@ impl HandshakeV10Long {
         short: HandshakeV10Short,
         mut reader: &mut (impl AsyncRead + Sync + Send + Unpin + ?Sized),
     ) -> std::io::Result<Self> {
-        let head = RawHandshakeV10ExtHeadProtocolFormat
-            .read_format(&mut reader)
-            .await?;
+        let head = RawHandshakeV10ExtHeadProtocolFormat.read_format(&mut reader).await?;
         let capability_flags = short
             .capability_flags
             .combine_upper_bytes(head.capability_flags_upper_bits);
@@ -112,10 +106,7 @@ impl HandshakeV10Long {
             None
         };
         let auth_plugin_name = if capability_flags.support_plugin_auth() {
-            format::NullTerminatedString
-                .read_format(&mut reader)
-                .await
-                .map(Some)?
+            format::NullTerminatedString.read_format(&mut reader).await.map(Some)?
         } else {
             None
         };
@@ -133,10 +124,7 @@ impl HandshakeV10Long {
     }
 
     /// Read additional portion from the payload
-    pub fn read_additional_sync(
-        short: HandshakeV10Short,
-        mut reader: impl Read,
-    ) -> std::io::Result<Self> {
+    pub fn read_additional_sync(short: HandshakeV10Short, mut reader: impl Read) -> std::io::Result<Self> {
         let head = RawHandshakeV10ExtHeadProtocolFormat.read_sync(&mut reader)?;
         let capability_flags = short
             .capability_flags
@@ -269,8 +257,7 @@ impl Handshake {
 
                 if packet_header.payload_length as usize > reader.read_bytes() {
                     // more data available
-                    HandshakeV10Long::read_additional_sync(short, reader.into_inner())
-                        .map(Self::V10Long)?
+                    HandshakeV10Long::read_additional_sync(short, reader.into_inner()).map(Self::V10Long)?
                 } else {
                     Self::V10Short(short)
                 }
@@ -445,9 +432,7 @@ impl ClientPacketIO for PublicKeyRequest {
 pub struct AuthMoreData(pub Vec<u8>);
 impl AuthMoreData {
     #[inline]
-    const fn format(
-        required_length: usize,
-    ) -> format::Mapped<format::Bytes, fn(Vec<u8>) -> AuthMoreData> {
+    const fn format(required_length: usize) -> format::Mapped<format::Bytes, fn(Vec<u8>) -> AuthMoreData> {
         format::Mapped(format::Bytes(required_length), AuthMoreData)
     }
 
@@ -484,10 +469,7 @@ impl AuthMoreData {
     }
 
     /// Reads the payload
-    pub fn read_sync(
-        payload_length: usize,
-        reader: &mut ReadCountedSync<impl Read>,
-    ) -> std::io::Result<Self> {
+    pub fn read_sync(payload_length: usize, reader: &mut ReadCountedSync<impl Read>) -> std::io::Result<Self> {
         Self::format(payload_length - reader.read_bytes()).read_sync(reader)
     }
 }
@@ -512,21 +494,14 @@ impl AuthMoreDataResponse {
     }
 }
 impl ReceivePacket for AuthMoreDataResponse {
-    fn read_packet(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let heading = format::U8.read_sync(&mut reader)?;
 
         match heading {
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(|e| (e, packet_header.sequence_id).into()),
+            0xff => ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|e| (e, packet_header.sequence_id).into()),
             0x01 => AuthMoreData::read_sync(packet_header.payload_length as _, &mut reader)
                 .map(|x| (x, packet_header.sequence_id).into()),
             _ => unreachable!("unexpected head byte for AuthMoreData response: 0x{heading:02x}"),
@@ -546,13 +521,9 @@ where
             let heading = format::U8.read_format(&mut reader).await?;
 
             match heading {
-                0xff => ErrPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capability,
-                )
-                .await
-                .map(|e| (e, packet_header.sequence_id).into()),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capability)
+                    .await
+                    .map(|e| (e, packet_header.sequence_id).into()),
                 0x01 => AuthMoreData::read(packet_header.payload_length as _, &mut reader)
                     .await
                     .map(|x| (x, packet_header.sequence_id).into()),

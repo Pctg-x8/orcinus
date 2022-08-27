@@ -72,15 +72,8 @@ pub trait Authentication {
 /// Asynchronous implementation of Authentication flow
 pub trait AsyncAuthentication<'s, S: 's + Send>: Authentication {
     /// Future type of Authentication flow
-    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>>
-        + Send
-        + 's;
+    type OperationF: std::future::Future<Output = Result<(OKPacket, u8), CommunicationError>> + Send + 's;
 
     /// Run Authentication flow
-    fn run(
-        &'s self,
-        stream: S,
-        con_info: &'s ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF;
+    fn run(&'s self, stream: S, con_info: &'s ConnectionInfo, first_sequence_id: u8) -> Self::OperationF;
 }

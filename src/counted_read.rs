@@ -50,8 +50,7 @@ where
 {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes = R::read(&mut self.inner, buf)?;
-        self.counter
-            .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel);
+        self.counter.fetch_add(bytes, std::sync::atomic::Ordering::AcqRel);
         Ok(bytes)
     }
 }

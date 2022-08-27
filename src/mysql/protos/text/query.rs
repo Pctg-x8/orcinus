@@ -7,9 +7,8 @@ use crate::{
     counted_read::{ReadCounted, ReadCountedSync},
     protos::{
         format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
-        AsyncReceivePacket, CapabilityFlags, ClientPacket, ClientPacketIO, ColumnType, EOFPacket41,
-        EOFPacket41Format, ErrPacket, InvalidColumnTypeError, LengthEncodedInteger, OKPacket,
-        PacketHeader, ReceivePacket,
+        AsyncReceivePacket, CapabilityFlags, ClientPacket, ClientPacketIO, ColumnType, EOFPacket41, EOFPacket41Format,
+        ErrPacket, InvalidColumnTypeError, LengthEncodedInteger, OKPacket, PacketHeader, ReceivePacket,
     },
     DefFormatStruct,
 };
@@ -58,31 +57,20 @@ impl QueryCommandResponse {
     }
 }
 impl ReceivePacket for QueryCommandResponse {
-    fn read_packet(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_value = format::U8.read_sync(&mut reader)?;
 
         match head_value {
-            0x00 => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Ok),
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Err),
-            0xfb => Self::local_infile_format(
-                packet_header.payload_length as usize - reader.read_bytes(),
-            )
-            .read_sync(reader.into_inner()),
+            0x00 => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
+            0xfb => Self::local_infile_format(packet_header.payload_length as usize - reader.read_bytes())
+                .read_sync(reader.into_inner()),
             _ => Self::resultset_format(head_value).read_sync(reader.into_inner()),
         }
     }
@@ -100,26 +88,16 @@ where
             let head_value = format::U8.read_format(&mut reader).await?;
 
             match head_value {
-                0x00 => OKPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capability,
-                )
-                .await
-                .map(Self::Ok),
-                0xff => ErrPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capability,
-                )
-                .await
-                .map(Self::Err),
-                0xfb => {
-                    Self::local_infile_format(
-                        packet_header.payload_length as usize - reader.read_bytes(),
-                    )
-                    .read_format(reader.into_inner())
+                0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capability)
                     .await
+                    .map(Self::Ok),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capability)
+                    .await
+                    .map(Self::Err),
+                0xfb => {
+                    Self::local_infile_format(packet_header.payload_length as usize - reader.read_bytes())
+                        .read_format(reader.into_inner())
+                        .await
                 }
                 _ => {
                     Self::resultset_format(head_value)
@@ -203,9 +181,7 @@ impl ColumnDefinition41 {
             .map(From::from)
     }
 
-    pub fn read_packet_for_field_list_sync(
-        reader: &mut (impl Read + ?Sized),
-    ) -> std::io::Result<Self> {
+    pub fn read_packet_for_field_list_sync(reader: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         RawColumnDefinition41ForFieldListFormat
             .read_sync(reader)
             .map(From::from)
@@ -222,13 +198,8 @@ impl ColumnDefinition41 {
     }
 }
 impl ReceivePacket for ColumnDefinition41 {
-    fn read_packet(
-        reader: impl Read,
-        _client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
-        RawColumnDefinition41Format
-            .read_sync(reader)
-            .map(From::from)
+    fn read_packet(reader: impl Read, _client_capability: CapabilityFlags) -> std::io::Result<Self> {
+        RawColumnDefinition41Format.read_sync(reader).map(From::from)
     }
 }
 impl<'r, R> AsyncReceivePacket<'r, R> for ColumnDefinition41
@@ -241,9 +212,7 @@ where
     > as AsyncProtocolFormatFragment<'r, &'r mut R>>::ReaderF;
 
     fn read_packet_async(reader: R, _client_capability: CapabilityFlags) -> Self::ReceiveF {
-        RawColumnDefinition41Format
-            .map(Self::from as _)
-            .read_format(reader)
+        RawColumnDefinition41Format.map(Self::from as _).read_format(reader)
     }
 }
 
@@ -276,14 +245,11 @@ impl<'s> Iterator for ResultsetValueDecomposer<'s> {
                 Some(ResultsetValue::Null)
             }
             _ => {
-                let LengthEncodedInteger(len) = LengthEncodedInteger::read_sync(&mut self.0)
-                    .expect("Failed to read resultset bytes");
-                let s = &self.0.get_ref()
-                    [self.0.position() as usize..(self.0.position() + len) as usize];
+                let LengthEncodedInteger(len) =
+                    LengthEncodedInteger::read_sync(&mut self.0).expect("Failed to read resultset bytes");
+                let s = &self.0.get_ref()[self.0.position() as usize..(self.0.position() + len) as usize];
                 self.0.set_position(self.0.position() + len);
-                Some(ResultsetValue::Value(unsafe {
-                    std::str::from_utf8_unchecked(s)
-                }))
+                Some(ResultsetValue::Value(unsafe { std::str::from_utf8_unchecked(s) }))
             }
         }
     }
@@ -320,28 +286,18 @@ impl Resultset41 {
 
         match head_byte {
             // treat as OK Packet for client supports DEPRECATE_EOF capability
-            0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Ok),
+            0xfe if client_capabilities.support_deprecate_eof() => {
+                OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Ok)
+            }
             0xfe => Self::EOF_FORMAT.read_format(reader.into_inner()).await,
-            0x00 => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Ok),
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Err),
+            0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                .await
+                .map(Self::Ok),
+            0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                .await
+                .map(Self::Err),
             _ => {
                 Self::row_format(head_byte, packet_header.payload_length as _)
                     .read_format(reader.into_inner())
@@ -350,37 +306,24 @@ impl Resultset41 {
         }
     }
 
-    pub fn read_packet_sync(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    pub fn read_packet_sync(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_byte = format::U8.read_sync(&mut reader)?;
 
         match head_byte {
             // treat as OK Packet for client supports DEPRECATE_EOF capability
-            0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Ok),
+            0xfe if client_capability.support_deprecate_eof() => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
             0xfe => Self::EOF_FORMAT.read_sync(reader.into_inner()),
-            0x00 => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Ok),
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Err),
-            _ => Self::row_format(head_byte, packet_header.payload_length as _)
-                .read_sync(reader.into_inner()),
+            0x00 => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
+            _ => Self::row_format(head_byte, packet_header.payload_length as _).read_sync(reader.into_inner()),
         }
     }
 }

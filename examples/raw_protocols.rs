@@ -189,18 +189,13 @@ async fn main() {
     };
     println!("connection: {resp:?}");
 
-    orcinus::protos::write_packet(
-        &mut stream,
-        orcinus::protos::QueryCommand("Select * from test_data"),
-        0,
-    )
-    .await
-    .expect("Failed to send query command");
+    orcinus::protos::write_packet(&mut stream, orcinus::protos::QueryCommand("Select * from test_data"), 0)
+        .await
+        .expect("Failed to send query command");
     stream.flush().await.expect("Failed to flush buffer");
-    let qc_result =
-        orcinus::protos::QueryCommandResponse::read_packet_async(&mut stream, capability)
-            .await
-            .expect("Failed to read query command result");
+    let qc_result = orcinus::protos::QueryCommandResponse::read_packet_async(&mut stream, capability)
+        .await
+        .expect("Failed to read query command result");
     println!("result: {qc_result:?}");
     let field_count = match qc_result {
         orcinus::protos::QueryCommandResponse::Resultset { column_count } => column_count,
@@ -314,21 +309,12 @@ async fn main() {
     };
 
     {
-        let mut resultset_stream =
-            orcinus::BinaryResultsetStream::new(&mut stream, capability, column_count as _)
-                .await
-                .expect("Failed to load resultset heading columns");
-        let column_types = unsafe {
-            resultset_stream
-                .column_types_unchecked()
-                .collect::<Vec<_>>()
-        };
-
-        while let Some(r) = resultset_stream
-            .try_next()
+        let mut resultset_stream = orcinus::BinaryResultsetStream::new(&mut stream, capability, column_count as _)
             .await
-            .expect("Failed to read resultset")
-        {
+            .expect("Failed to load resultset heading columns");
+        let column_types = unsafe { resultset_stream.column_types_unchecked().collect::<Vec<_>>() };
+
+        while let Some(r) = resultset_stream.try_next().await.expect("Failed to read resultset") {
             let values = r
                 .decode_values(&column_types)
                 .collect::<Result<Vec<_>, _>>()
@@ -342,13 +328,9 @@ async fn main() {
         );
     }
 
-    orcinus::protos::write_packet(
-        &mut stream,
-        orcinus::protos::StmtCloseCommand(resp.statement_id),
-        0,
-    )
-    .await
-    .expect("Failed to write stmt close command");
+    orcinus::protos::write_packet(&mut stream, orcinus::protos::StmtCloseCommand(resp.statement_id), 0)
+        .await
+        .expect("Failed to write stmt close command");
 
     orcinus::protos::write_packet(&mut stream, orcinus::protos::QuitCommand, 0)
         .await

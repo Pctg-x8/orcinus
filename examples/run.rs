@@ -19,18 +19,11 @@ async fn main() {
             .await
             .expect("Failed to send query command");
 
-        while let Some(r) = row_stream
-            .try_next()
-            .await
-            .expect("Failed to read resultset")
-        {
+        while let Some(r) = row_stream.try_next().await.expect("Failed to read resultset") {
             println!("row: {:?}", r.decompose_values().collect::<Vec<_>>());
         }
 
-        println!(
-            "enumeration end: more_result={:?}",
-            row_stream.has_more_resultset()
-        );
+        println!("enumeration end: more_result={:?}", row_stream.has_more_resultset());
     }
 
     let client = client.share();
@@ -54,17 +47,9 @@ async fn main() {
             .binary_resultset_stream(column_count as _)
             .await
             .expect("Failed to load resultset heading columns");
-        let column_types = unsafe {
-            resultset_stream
-                .column_types_unchecked()
-                .collect::<Vec<_>>()
-        };
+        let column_types = unsafe { resultset_stream.column_types_unchecked().collect::<Vec<_>>() };
 
-        while let Some(r) = resultset_stream
-            .try_next()
-            .await
-            .expect("Failed to read resultset")
-        {
+        while let Some(r) = resultset_stream.try_next().await.expect("Failed to read resultset") {
             let values = r
                 .decode_values(&column_types)
                 .collect::<Result<Vec<_>, _>>()
@@ -79,9 +64,5 @@ async fn main() {
     }
 
     stmt.close().await.expect("Failed to close stmt");
-    client
-        .unshare()
-        .quit()
-        .await
-        .expect("Failed to quit client");
+    client.unshare().quit().await.expect("Failed to quit client");
 }

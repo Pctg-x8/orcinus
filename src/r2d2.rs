@@ -11,9 +11,7 @@ pub struct MysqlTcpConnection<'s, A: ToSocketAddrs> {
     /// An information structure for connection(passed to `BlockingClient::handshake`).
     pub con_info: super::ConnectInfo<'s>,
 }
-impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
-    for MysqlTcpConnection<'static, A>
-{
+impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection for MysqlTcpConnection<'static, A> {
     type Connection = super::BlockingClient<std::net::TcpStream>;
     type Error = super::CommunicationError;
 
@@ -60,18 +58,12 @@ pub struct MysqlConnection<'s, A: ToSocketAddrs> {
     pub con_info: super::autossl_client::SSLConnectInfo<'s>,
 }
 #[cfg(feature = "autossl")]
-impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
-    for MysqlConnection<'static, A>
-{
+impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection for MysqlConnection<'static, A> {
     type Connection = super::autossl_client::BlockingClient;
     type Error = super::autossl_client::ConnectionError;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        super::autossl_client::BlockingClient::new(
-            &self.addr,
-            self.server_name.clone(),
-            &self.con_info,
-        )
+        super::autossl_client::BlockingClient::new(&self.addr, self.server_name.clone(), &self.con_info)
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
@@ -86,9 +78,7 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> r2d2::ManageConnection
 }
 
 #[cfg(feature = "autossl")]
-impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
-    for r2d2::PooledConnection<MysqlConnection<'static, A>>
-{
+impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient for r2d2::PooledConnection<MysqlConnection<'static, A>> {
     type Stream = super::autossl_client::DynamicStream;
 
     fn stream(&self) -> &Self::Stream {

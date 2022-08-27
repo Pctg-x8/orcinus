@@ -22,10 +22,7 @@ fn main() {
             );
         }
 
-        println!(
-            "enumeration end: more_result={:?}",
-            row_iter.has_more_resultset()
-        );
+        println!("enumeration end: more_result={:?}", row_iter.has_more_resultset());
     }
 
     let client = orcinus::SharedBlockingClient::share_from(client);

@@ -8,8 +8,8 @@ use x509_parser::prelude::parse_x509_pem;
 
 use crate::{
     protos::{
-        request, write_packet, write_packet_sync, AsyncReceivePacket, AuthMoreData,
-        AuthMoreDataResponse, GenericOKErrPacket, OKPacket, PublicKeyRequest, ReceivePacket,
+        request, write_packet, write_packet_sync, AsyncReceivePacket, AuthMoreData, AuthMoreDataResponse,
+        GenericOKErrPacket, OKPacket, PublicKeyRequest, ReceivePacket,
     },
     CommunicationError,
 };
@@ -45,12 +45,7 @@ where
 {
     type OperationF = BoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
 
-    fn run(
-        &'s self,
-        _stream: S,
-        _con_info: &'s super::ConnectionInfo,
-        _first_sequence_id: u8,
-    ) -> Self::OperationF {
+    fn run(&'s self, _stream: S, _con_info: &'s super::ConnectionInfo, _first_sequence_id: u8) -> Self::OperationF {
         todo!("sha256_password authentication")
     }
 }
@@ -104,8 +99,7 @@ impl super::Authentication for CachedSHA256<'_> {
             )?;
             stream.flush()?;
             let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?
-                    .into_result()?;
+                GenericOKErrPacket::read_packet(stream, con_info.client_capabilities)?.into_result()?;
 
             return Ok((resp, sequence_id));
         }
@@ -124,8 +118,7 @@ impl super::Authentication for CachedSHA256<'_> {
         )?;
         stream.flush()?;
         let (AuthMoreData(resp), last_sequence_id) =
-            AuthMoreDataResponse::read_packet(&mut stream, con_info.client_capabilities)?
-                .into_result()?;
+            AuthMoreDataResponse::read_packet(&mut stream, con_info.client_capabilities)?.into_result()?;
 
         if resp == [0x03] {
             // ok
@@ -135,22 +128,20 @@ impl super::Authentication for CachedSHA256<'_> {
         }
         assert_eq!(resp, [0x04]); // requires full authentication
 
-        let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) =
-            if let Some(spki_der) = self.0.server_spki_der {
-                (Cow::Borrowed(spki_der), last_sequence_id)
-            } else {
-                let (AuthMoreData(resp), last_sequence_id) = request(
-                    PublicKeyRequest,
-                    &mut stream,
-                    last_sequence_id + 1,
-                    con_info.client_capabilities,
-                )?
-                .into_result()?;
-                let (_, spki_der) =
-                    parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
+        let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) = if let Some(spki_der) = self.0.server_spki_der {
+            (Cow::Borrowed(spki_der), last_sequence_id)
+        } else {
+            let (AuthMoreData(resp), last_sequence_id) = request(
+                PublicKeyRequest,
+                &mut stream,
+                last_sequence_id + 1,
+                con_info.client_capabilities,
+            )?
+            .into_result()?;
+            let (_, spki_der) = parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 
-                (Cow::Owned(spki_der.contents), last_sequence_id)
-            };
+            (Cow::Owned(spki_der.contents), last_sequence_id)
+        };
 
         let scrambled_password = con_info
             .password
@@ -183,30 +174,22 @@ where
 {
     type OperationF = BoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
 
-    fn run(
-        &'s self,
-        mut stream: S,
-        con_info: &'s super::ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF {
+    fn run(&'s self, mut stream: S, con_info: &'s super::ConnectionInfo, first_sequence_id: u8) -> Self::OperationF {
         async move {
             if con_info.password.is_empty() {
                 // empty password authentication
 
                 write_packet(
                     &mut stream,
-                    con_info
-                        .make_handshake_response(&[], Some(<Self as super::Authentication>::NAME)),
+                    con_info.make_handshake_response(&[], Some(<Self as super::Authentication>::NAME)),
                     first_sequence_id,
                 )
                 .await?;
                 stream.flush().await?;
-                let (resp, sequence_id) = GenericOKErrPacket::read_packet_async(
-                    &mut stream,
-                    con_info.client_capabilities,
-                )
-                .await?
-                .into_result()?;
+                let (resp, sequence_id) =
+                    GenericOKErrPacket::read_packet_async(&mut stream, con_info.client_capabilities)
+                        .await?
+                        .into_result()?;
 
                 return Ok((resp, sequence_id));
             }
@@ -220,10 +203,7 @@ where
 
             write_packet(
                 &mut stream,
-                con_info.make_handshake_response(
-                    &auth_response,
-                    Some(<Self as super::Authentication>::NAME),
-                ),
+                con_info.make_handshake_response(&auth_response, Some(<Self as super::Authentication>::NAME)),
                 first_sequence_id,
             )
             .await?;
@@ -235,34 +215,26 @@ where
 
             if resp == [0x03] {
                 // ok
-                return GenericOKErrPacket::read_packet_async(
-                    &mut stream,
-                    con_info.client_capabilities,
-                )
-                .await?
-                .into_result()
-                .map_err(From::from);
+                return GenericOKErrPacket::read_packet_async(&mut stream, con_info.client_capabilities)
+                    .await?
+                    .into_result()
+                    .map_err(From::from);
             }
             assert_eq!(resp, [0x04]); // requires full authentication
 
-            let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) =
-                if let Some(spki_der) = self.0.server_spki_der {
-                    (Cow::Borrowed(spki_der), last_sequence_id)
-                } else {
-                    write_packet(&mut stream, PublicKeyRequest, 0).await?;
-                    stream.flush().await?;
-                    let (AuthMoreData(resp), last_sequence_id) =
-                        AuthMoreDataResponse::read_packet_async(
-                            &mut stream,
-                            con_info.client_capabilities,
-                        )
+            let (server_spki_der, last_sequence_id): (Cow<[u8]>, u8) = if let Some(spki_der) = self.0.server_spki_der {
+                (Cow::Borrowed(spki_der), last_sequence_id)
+            } else {
+                write_packet(&mut stream, PublicKeyRequest, 0).await?;
+                stream.flush().await?;
+                let (AuthMoreData(resp), last_sequence_id) =
+                    AuthMoreDataResponse::read_packet_async(&mut stream, con_info.client_capabilities)
                         .await?
                         .into_result()?;
-                    let (_, spki_der) =
-                        parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
+                let (_, spki_der) = parse_x509_pem(&resp).expect("invalid pubkey retrieved from server");
 
-                    (Cow::Owned(spki_der.contents), last_sequence_id)
-                };
+                (Cow::Owned(spki_der.contents), last_sequence_id)
+            };
 
             let auth_response = {
                 let scrambled_password = con_info
@@ -272,16 +244,12 @@ where
                         self.0
                             .scramble_buffer_1
                             .iter()
-                            .chain(
-                                self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1]
-                                    .iter(),
-                            )
+                            .chain(self.0.scramble_buffer_2[..self.0.scramble_buffer_2.len() - 1].iter())
                             .cycle(),
                     )
                     .map(|(a, &b)| a ^ b)
                     .collect::<Vec<_>>();
-                let key = RsaPublicKey::from_public_key_der(&server_spki_der)
-                    .expect("invalid spki format");
+                let key = RsaPublicKey::from_public_key_der(&server_spki_der).expect("invalid spki format");
                 let padding = PaddingScheme::new_oaep::<Sha1>();
                 key.encrypt(&mut rand::thread_rng(), padding, &scrambled_password)
                     .expect("Failed to encrypt password")

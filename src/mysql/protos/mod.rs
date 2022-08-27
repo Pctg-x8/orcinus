@@ -59,11 +59,7 @@ pub async fn write_packet(
     writer.write_all(&payload).await
 }
 /// Writes a packet(blocking op).
-pub fn write_packet_sync(
-    mut writer: impl Write,
-    payload: impl ClientPacket,
-    sequence_id: u8,
-) -> std::io::Result<()> {
+pub fn write_packet_sync(mut writer: impl Write, payload: impl ClientPacket, sequence_id: u8) -> std::io::Result<()> {
     let payload = payload.serialize_payload();
 
     writer.write_all(
@@ -225,10 +221,7 @@ impl LengthEncodedInteger {
     }
 
     /// Reads from reader(non-blocking). The first byte is read externally.
-    pub async fn read_ahead(
-        first_byte: u8,
-        reader: &mut (impl AsyncRead + Unpin + ?Sized),
-    ) -> std::io::Result<Self> {
+    pub async fn read_ahead(first_byte: u8, reader: &mut (impl AsyncRead + Unpin + ?Sized)) -> std::io::Result<Self> {
         match first_byte {
             x if x < 251 => Ok(Self(first_byte as _)),
             0xfc => reader.read_u16_le().await.map(|x| Self(x as _)),
@@ -270,10 +263,7 @@ impl LengthEncodedInteger {
     }
 
     /// Writes as bytes(blocking).
-    pub async fn write(
-        &self,
-        writer: &mut (impl AsyncWrite + Unpin + ?Sized),
-    ) -> std::io::Result<()> {
+    pub async fn write(&self, writer: &mut (impl AsyncWrite + Unpin + ?Sized)) -> std::io::Result<()> {
         if self.0 < 251 {
             writer.write_u8(self.0 as _).await
         } else if self.0 < 2u64.pow(16) {
@@ -374,12 +364,7 @@ impl OKPacket {
         let header = format::U8.read_format(&mut reader).await?;
         assert_eq!(header, 0x00, "unexpected response packet header");
 
-        Self::read(
-            packet_header.payload_length as _,
-            &mut reader,
-            client_capability,
-        )
-        .await
+        Self::read(packet_header.payload_length as _, &mut reader, client_capability).await
     }
 
     /// Reads a packet that is expected as OKPacket.
@@ -392,11 +377,7 @@ impl OKPacket {
         let header = format::U8.read_sync(&mut reader)?;
         assert_eq!(header, 0x00, "unexpected response packet header");
 
-        Self::read_sync(
-            packet_header.payload_length as _,
-            &mut reader,
-            client_capability,
-        )
+        Self::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
     }
 
     /// Reads the payload(non-blocking).
@@ -405,9 +386,7 @@ impl OKPacket {
         mut reader: &mut ReadCounted<impl AsyncRead + Send + Unpin>,
         client_capability: CapabilityFlags,
     ) -> std::io::Result<Self> {
-        let ch = RawOKPacketCommonHeaderFormat
-            .read_format(&mut reader)
-            .await?;
+        let ch = RawOKPacketCommonHeaderFormat.read_format(&mut reader).await?;
         let capability_extra = if client_capability.support_41_protocol() {
             RawOKPacket41ExtFormat
                 .read_format(&mut reader)
@@ -431,10 +410,7 @@ impl OKPacket {
         if client_capability.support_session_track() {
             info = format::LengthEncodedString.read_format(&mut reader).await?;
             session_state_changes = if st.has_state_changed() {
-                format::LengthEncodedString
-                    .read_format(&mut reader)
-                    .await
-                    .map(Some)?
+                format::LengthEncodedString.read_format(&mut reader).await.map(Some)?
             } else {
                 None
             };
@@ -463,9 +439,7 @@ impl OKPacket {
         let ch = RawOKPacketCommonHeaderFormat.read_sync(&mut reader)?;
 
         let capability_extra = if client_capability.support_41_protocol() {
-            RawOKPacket41ExtFormat
-                .read_sync(&mut reader)
-                .map(|x| Some(x.into()))?
+            RawOKPacket41ExtFormat.read_sync(&mut reader).map(|x| Some(x.into()))?
         } else if client_capability.support_transaction() {
             RawOKPacketTransactionsExtFormat
                 .read_sync(&mut reader)
@@ -488,8 +462,7 @@ impl OKPacket {
                 None
             };
         } else {
-            info = format::FixedLengthString(payload_length - reader.read_bytes())
-                .read_sync(reader)?;
+            info = format::FixedLengthString(payload_length - reader.read_bytes()).read_sync(reader)?;
             session_state_changes = None;
         };
 
@@ -509,9 +482,7 @@ impl OKPacket {
     pub fn status_flags(&self) -> Option<StatusFlags> {
         match self.capability_extra {
             Some(OKPacketCapabilityExtraData::Protocol41 { status_flags, .. })
-            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => {
-                Some(status_flags)
-            }
+            | Some(OKPacketCapabilityExtraData::Transactions { status_flags }) => Some(status_flags),
             _ => None,
         }
     }
@@ -537,10 +508,7 @@ impl ErrPacket {
         let code = format::U16.read_format(&mut reader).await?;
         let sql_state = if client_capabilities.support_41_protocol() {
             let _ = format::FixedBytes::<1>.read_format(&mut reader).await?;
-            format::FixedBytes::<5>
-                .map(Some)
-                .read_format(&mut reader)
-                .await?
+            format::FixedBytes::<5>.map(Some).read_format(&mut reader).await?
         } else {
             None
         };
@@ -568,8 +536,7 @@ impl ErrPacket {
         } else {
             None
         };
-        let error_message =
-            format::FixedLengthString(payload_size - reader.read_bytes()).read_sync(reader)?;
+        let error_message = format::FixedLengthString(payload_size - reader.read_bytes()).read_sync(reader)?;
 
         Ok(Self {
             code,
@@ -605,12 +572,8 @@ DefFormatStruct!(RawEOFPacket41ExpectHeader(RawEOFPacket41ExpectHeaderFormat) {
 });
 impl EOFPacket41 {
     /// Reads a packet that is expected as EOFPacket(non-blocking).
-    pub async fn expected_read_packet(
-        mut reader: impl AsyncRead + Send + Unpin,
-    ) -> std::io::Result<Self> {
-        let _ = RawEOFPacket41ExpectHeaderFormat
-            .read_format(&mut reader)
-            .await?;
+    pub async fn expected_read_packet(mut reader: impl AsyncRead + Send + Unpin) -> std::io::Result<Self> {
+        let _ = RawEOFPacket41ExpectHeaderFormat.read_format(&mut reader).await?;
         EOFPacket41Format.read_format(reader).await
     }
 
@@ -668,27 +631,16 @@ impl GenericOKErrPacket {
     }
 }
 impl ReceivePacket for GenericOKErrPacket {
-    fn read_packet(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let first_byte = format::U8.read_sync(&mut reader)?;
 
         match first_byte {
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(|x| (x, packet_header.sequence_id).into()),
-            0x00 => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(|x| (x, packet_header.sequence_id).into()),
+            0xff => ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|x| (x, packet_header.sequence_id).into()),
+            0x00 => OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability)
+                .map(|x| (x, packet_header.sequence_id).into()),
             _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
         }
     }
@@ -706,20 +658,12 @@ where
             let first_byte = format::U8.read_format(&mut reader).await?;
 
             match first_byte {
-                0xff => ErrPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capabilities,
-                )
-                .await
-                .map(|x| (x, packet_header.sequence_id).into()),
-                0x00 => OKPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capabilities,
-                )
-                .await
-                .map(|x| (x, packet_header.sequence_id).into()),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
+                0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(|x| (x, packet_header.sequence_id).into()),
                 _ => unreachable!("unexpected payload header: 0x{first_byte:02x}"),
             }
         }

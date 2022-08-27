@@ -3,5 +3,8 @@
     "[markdown]": {
         "editor.formatOnSave": false
     },
-    "rust-analyzer.cargo.features": "all"
+    "rust-analyzer.cargo.features": "all",
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": true
+    }
 }

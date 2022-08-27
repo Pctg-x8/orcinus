@@ -8,8 +8,7 @@ use crate::counted_read::{ReadCounted, ReadCountedSync};
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
-    CapabilityFlags, ColumnType, EOFPacket41, EOFPacket41Format, ErrPacket, LengthEncodedInteger,
-    OKPacket, Value,
+    CapabilityFlags, ColumnType, EOFPacket41, EOFPacket41Format, ErrPacket, LengthEncodedInteger, OKPacket, Value,
 };
 
 /// Binary Protocol Value format: https://dev.mysql.com/doc/internals/en/binary-protocol-value.html
@@ -288,10 +287,7 @@ pub fn serialize_null_bitmap(values: &[impl BinaryProtocolValue], sink: &mut Vec
 /// Serialize value types into bytes
 ///
 /// values: iterator of (value, unsigned_flag)
-pub fn serialize_value_types<'d>(
-    values: impl Iterator<Item = (&'d Value<'d>, bool)>,
-    sink: &mut Vec<u8>,
-) {
+pub fn serialize_value_types<'d>(values: impl Iterator<Item = (&'d Value<'d>, bool)>, sink: &mut Vec<u8>) {
     let (l, h) = values.size_hint();
     sink.reserve(h.unwrap_or(l));
     for (v, uf) in values {
@@ -300,10 +296,7 @@ pub fn serialize_value_types<'d>(
 }
 
 /// Serialize values into bytes
-pub fn serialize_values<'d>(
-    values: impl Iterator<Item = impl BinaryProtocolValue>,
-    sink: &mut Vec<u8>,
-) {
+pub fn serialize_values<'d>(values: impl Iterator<Item = impl BinaryProtocolValue>, sink: &mut Vec<u8>) {
     for v in values {
         v.serialize_into(sink);
     }
@@ -331,10 +324,7 @@ impl BinaryResultsetRow {
             .read_format(&mut reader)
             .await?;
 
-        Ok(Self {
-            null_bitmap,
-            values,
-        })
+        Ok(Self { null_bitmap, values })
     }
 
     /// Reads the payload
@@ -346,18 +336,12 @@ impl BinaryResultsetRow {
         let null_bitmap = format::Bytes((column_count + 7 + 2) / 8).read_sync(&mut reader)?;
         let values = format::Bytes(payload_length - reader.read_bytes()).read_sync(reader)?;
 
-        Ok(Self {
-            null_bitmap,
-            values,
-        })
+        Ok(Self { null_bitmap, values })
     }
 
     /// Decode values following passed column types.
     #[inline]
-    pub fn decode_values<'r, 'cs>(
-        &'r self,
-        column_types: &'cs [ColumnType],
-    ) -> BinaryResultsetRowValues<'r, 'cs> {
+    pub fn decode_values<'r, 'cs>(&'r self, column_types: &'cs [ColumnType]) -> BinaryResultsetRowValues<'r, 'cs> {
         BinaryResultsetRowValues {
             null_bitmap: &self.null_bitmap,
             values: std::io::Cursor::new(&self.values),
@@ -383,8 +367,7 @@ impl<'r> Iterator for BinaryResultsetRowValues<'r, '_> {
         }
 
         let null_bit_position = self.element_counter + 2; // 謎に+2されてるぶん
-        let is_null_value =
-            (self.null_bitmap[null_bit_position / 8] & (0x01 << (null_bit_position % 8))) != 0;
+        let is_null_value = (self.null_bitmap[null_bit_position / 8] & (0x01 << (null_bit_position % 8))) != 0;
         let ty = if is_null_value {
             ColumnType::Null
         } else {
@@ -424,29 +407,19 @@ impl BinaryResultset41 {
 
         match r1 {
             // treat as OK Packet for client supports DEPRECATE_EOF capability
-            0xfe if client_capabilities.support_deprecate_eof() => OKPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Ok),
+            0xfe if client_capabilities.support_deprecate_eof() => {
+                OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Ok)
+            }
             0xfe => Self::EOF_FORMAT.read_format(reader.into_inner()).await,
-            0xff => ErrPacket::read(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capabilities,
-            )
-            .await
-            .map(Self::Err),
+            0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                .await
+                .map(Self::Err),
             // 0x00 is a normal resultset row in binary protocol(terminal packet is OK packet started with 0xfe)
-            0x00 => BinaryResultsetRow::read(
-                packet_header.payload_length as _,
-                column_count,
-                &mut reader,
-            )
-            .await
-            .map(Self::Row),
+            0x00 => BinaryResultsetRow::read(packet_header.payload_length as _, column_count, &mut reader)
+                .await
+                .map(Self::Row),
             _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{r1:02x}"),
         }
     }
@@ -463,29 +436,17 @@ impl BinaryResultset41 {
 
         match head_byte {
             // treat as OK Packet for client supports DEPRECATE_EOF capability
-            0xfe if client_capability.support_deprecate_eof() => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Ok),
+            0xfe if client_capability.support_deprecate_eof() => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
             0xfe => Self::EOF_FORMAT.read_sync(reader.into_inner()),
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Err),
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
             // 0x00 is a normal resultset row in binary protocol(terminal packet is OK packet started with 0xfe)
-            0x00 => BinaryResultsetRow::read_sync(
-                packet_header.payload_length as _,
-                column_count,
-                &mut reader,
-            )
-            .map(Self::Row),
-            _ => unreachable!(
-                "invalid heading byte for binary protocol resultset: 0x{head_byte:02x}"
-            ),
+            0x00 => BinaryResultsetRow::read_sync(packet_header.payload_length as _, column_count, &mut reader)
+                .map(Self::Row),
+            _ => unreachable!("invalid heading byte for binary protocol resultset: 0x{head_byte:02x}"),
         }
     }
 }

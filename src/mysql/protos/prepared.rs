@@ -10,8 +10,8 @@ use crate::{
 
 use super::{
     format::{self, AsyncProtocolFormatFragment, ProtocolFormatFragment},
-    serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket,
-    GenericOKErrPacket, OKPacket, Value,
+    serialize_null_bitmap, serialize_value_types, serialize_values, CapabilityFlags, ErrPacket, GenericOKErrPacket,
+    OKPacket, Value,
 };
 
 /// Creates a prepared statement: https://dev.mysql.com/doc/internals/en/com-stmt-prepare.html
@@ -98,11 +98,7 @@ impl super::ClientPacket for StmtExecuteCommand<'_> {
         sink.extend(1u32.to_le_bytes()); // iteration count
         if self.parameters.len() > 0 {
             serialize_null_bitmap(&self.parameters, &mut sink);
-            sink.push(if self.requires_rebound_parameters {
-                0x01
-            } else {
-                0x00
-            });
+            sink.push(if self.requires_rebound_parameters { 0x01 } else { 0x00 });
 
             if self.requires_rebound_parameters {
                 serialize_value_types(self.parameters.iter().map(|&(ref a, b)| (a, b)), &mut sink);
@@ -162,9 +158,7 @@ where
     >;
 
     fn read_format(self, reader: R) -> Self::ReaderF {
-        RawStmtPrepareOkFormat
-            .read_format(reader)
-            .map_ok(From::from)
+        RawStmtPrepareOkFormat.read_format(reader).map_ok(From::from)
     }
 }
 
@@ -189,24 +183,16 @@ impl StmtPrepareResult {
     }
 }
 impl super::ReceivePacket for StmtPrepareResult {
-    fn read_packet(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let first_byte = format::U8.read_sync(&mut reader)?;
 
         match first_byte {
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(From::from),
-            0x00 => StmtPrepareOkFormat
-                .read_sync(reader.into_inner())
-                .map(From::from),
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(From::from)
+            }
+            0x00 => StmtPrepareOkFormat.read_sync(reader.into_inner()).map(From::from),
             _ => unreachable!("unexpected response of COM_STMT_PREPARE: 0x{first_byte:02x}"),
         }
     }
@@ -224,13 +210,9 @@ where
             let first_byte = format::U8.read_format(&mut reader).await?;
 
             match first_byte {
-                0xff => ErrPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capabilities,
-                )
-                .await
-                .map(From::from),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(From::from),
                 0x00 => StmtPrepareOkFormat
                     .read_format(reader.into_inner())
                     .await
@@ -262,27 +244,18 @@ impl StmtExecuteResult {
     }
 }
 impl super::ReceivePacket for StmtExecuteResult {
-    fn read_packet(
-        mut reader: impl Read,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    fn read_packet(mut reader: impl Read, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let packet_header = format::PacketHeader.read_sync(&mut reader)?;
         let mut reader = ReadCountedSync::new(reader);
         let head_byte = format::U8.read_sync(&mut reader)?;
 
         match head_byte {
-            0x00 => OKPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Ok),
-            0xff => ErrPacket::read_sync(
-                packet_header.payload_length as _,
-                &mut reader,
-                client_capability,
-            )
-            .map(Self::Err),
+            0x00 => {
+                OKPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Ok)
+            }
+            0xff => {
+                ErrPacket::read_sync(packet_header.payload_length as _, &mut reader, client_capability).map(Self::Err)
+            }
             _ => Self::resultset_format(head_byte).read_sync(reader.into_inner()),
         }
     }
@@ -300,25 +273,13 @@ where
             let head_byte = format::U8.read_format(&mut reader).await?;
 
             match head_byte {
-                0x00 => OKPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capabilities,
-                )
-                .await
-                .map(Self::Ok),
-                0xff => ErrPacket::read(
-                    packet_header.payload_length as _,
-                    &mut reader,
-                    client_capabilities,
-                )
-                .await
-                .map(Self::Err),
-                _ => {
-                    Self::resultset_format(head_byte)
-                        .read_format(reader.into_inner())
-                        .await
-                }
+                0x00 => OKPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Ok),
+                0xff => ErrPacket::read(packet_header.payload_length as _, &mut reader, client_capabilities)
+                    .await
+                    .map(Self::Err),
+                _ => Self::resultset_format(head_byte).read_format(reader.into_inner()).await,
             }
         }
         .boxed()

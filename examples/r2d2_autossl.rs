@@ -12,8 +12,7 @@ impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
         _ocsp_response: &[u8],
         _now: std::time::SystemTime,
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..])
-            .expect("invalid certificate format");
+        let cert = x509_parser::parse_x509_certificate(&end_entity.0[..]).expect("invalid certificate format");
         println!("end entity subject: {}", cert.1.subject);
 
         Ok(rustls::client::ServerCertVerified::assertion())
@@ -52,10 +51,7 @@ fn main() {
             );
         }
 
-        println!(
-            "enumeration end: more_result={:?}",
-            row_iter.has_more_resultset()
-        );
+        println!("enumeration end: more_result={:?}", row_iter.has_more_resultset());
     }
 
     let client = orcinus::SharedBlockingClient::share_from(client);

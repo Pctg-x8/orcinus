@@ -3,10 +3,7 @@ use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY as SHA1};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    protos::{
-        write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket,
-        ReceivePacket,
-    },
+    protos::{write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket, ReceivePacket},
     CommunicationError,
 };
 
@@ -42,11 +39,7 @@ impl super::Authentication for Native41<'_> {
         con_info: &super::ConnectionInfo,
         first_sequence_id: u8,
     ) -> Result<(OKPacket, u8), CommunicationError> {
-        let payload = gen_secure_password_auth_response(
-            con_info.password,
-            self.server_data_1,
-            self.server_data_2,
-        );
+        let payload = gen_secure_password_auth_response(con_info.password, self.server_data_1, self.server_data_2);
 
         write_packet_sync(
             &mut stream,
@@ -66,31 +59,20 @@ where
 {
     type OperationF = BoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
 
-    fn run(
-        &'s self,
-        mut stream: S,
-        con_info: &'s super::ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF {
+    fn run(&'s self, mut stream: S, con_info: &'s super::ConnectionInfo, first_sequence_id: u8) -> Self::OperationF {
         async move {
-            let payload = gen_secure_password_auth_response(
-                con_info.password,
-                self.server_data_1,
-                self.server_data_2,
-            );
+            let payload = gen_secure_password_auth_response(con_info.password, self.server_data_1, self.server_data_2);
 
             write_packet(
                 &mut stream,
-                con_info
-                    .make_handshake_response(&payload, Some(<Self as super::Authentication>::NAME)),
+                con_info.make_handshake_response(&payload, Some(<Self as super::Authentication>::NAME)),
                 first_sequence_id,
             )
             .await?;
             stream.flush().await?;
-            let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
-                    .await?
-                    .into_result()?;
+            let (resp, sequence_id) = GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
+                .await?
+                .into_result()?;
 
             Ok((resp, sequence_id))
         }

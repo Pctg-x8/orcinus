@@ -4,10 +4,7 @@ use futures_util::{future::BoxFuture, FutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    protos::{
-        write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket,
-        ReceivePacket,
-    },
+    protos::{write_packet, write_packet_sync, AsyncReceivePacket, GenericOKErrPacket, OKPacket, ReceivePacket},
     CommunicationError,
 };
 
@@ -44,12 +41,7 @@ where
 {
     type OperationF = BoxFuture<'s, Result<(OKPacket, u8), CommunicationError>>;
 
-    fn run(
-        &'s self,
-        mut stream: S,
-        con_info: &'s super::ConnectionInfo,
-        first_sequence_id: u8,
-    ) -> Self::OperationF {
+    fn run(&'s self, mut stream: S, con_info: &'s super::ConnectionInfo, first_sequence_id: u8) -> Self::OperationF {
         async move {
             let mut buf = Vec::with_capacity(con_info.password.as_bytes().len() + 1);
             buf.extend(con_info.password.bytes());
@@ -62,10 +54,9 @@ where
             )
             .await?;
             stream.flush().await?;
-            let (resp, sequence_id) =
-                GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
-                    .await?
-                    .into_result()?;
+            let (resp, sequence_id) = GenericOKErrPacket::read_packet_async(stream, con_info.client_capabilities)
+                .await?
+                .into_result()?;
 
             Ok((resp, sequence_id))
         }

@@ -151,10 +151,7 @@ pub struct BlockingClient<Stream: Write> {
 }
 impl<Stream: Write> BlockingClient<Stream> {
     /// Negotiate handshake protocol with MySQL server on specified stream and information.
-    pub fn handshake(
-        mut stream: Stream,
-        connect_info: &ConnectInfo,
-    ) -> Result<Self, CommunicationError>
+    pub fn handshake(mut stream: Stream, connect_info: &ConnectInfo) -> Result<Self, CommunicationError>
     where
         Stream: Read,
     {
@@ -255,17 +252,14 @@ impl<Stream: Write> BlockingClient<Stream> {
     }
 
     /// Post SQL statement to server, and fetch result sets by iterator(fetching is lazily executed).
-    pub fn fetch_all<'s>(
-        &'s mut self,
-        query: &str,
-    ) -> Result<TextResultsetIterator<&'s mut Stream>, CommunicationError>
+    pub fn fetch_all<'s>(&'s mut self, query: &str) -> Result<TextResultsetIterator<&'s mut Stream>, CommunicationError>
     where
         Stream: Read,
     {
         match self.query(query)? {
-            QueryCommandResponse::Resultset { column_count } => self
-                .text_resultset_iterator(column_count as _)
-                .map_err(From::from),
+            QueryCommandResponse::Resultset { column_count } => {
+                self.text_resultset_iterator(column_count as _).map_err(From::from)
+            }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
             QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
             QueryCommandResponse::LocalInfileRequest { filename } => {
@@ -308,9 +302,7 @@ impl BlockingClient<std::net::TcpStream> {
         let capability = self.capability;
         std::mem::forget(self);
 
-        stream
-            .set_nonblocking(true)
-            .expect("Failed to switch blocking mode");
+        stream.set_nonblocking(true).expect("Failed to switch blocking mode");
 
         Client {
             stream: tokio::io::BufStream::new(
@@ -328,10 +320,7 @@ pub struct Client<Stream: AsyncWriteExt + Send + Sync + Unpin> {
 }
 impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
     /// Negotiate handshake protocol with MySQL server on specified stream and information.
-    pub async fn handshake(
-        mut stream: Stream,
-        connect_info: &ConnectInfo<'_>,
-    ) -> Result<Self, CommunicationError>
+    pub async fn handshake(mut stream: Stream, connect_info: &ConnectInfo<'_>) -> Result<Self, CommunicationError>
     where
         Stream: AsyncRead + Sync + Send + 'static,
     {
@@ -450,10 +439,9 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         Stream: AsyncRead + Sync + Send,
     {
         match self.query(query).await? {
-            QueryCommandResponse::Resultset { column_count } => self
-                .text_resultset_stream(column_count as _)
-                .await
-                .map_err(From::from),
+            QueryCommandResponse::Resultset { column_count } => {
+                self.text_resultset_stream(column_count as _).await.map_err(From::from)
+            }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
             QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
             QueryCommandResponse::LocalInfileRequest { filename } => {
@@ -586,10 +574,7 @@ pub struct Statement<'c, C: SharedMysqlClient<'c>> {
 }
 impl<C: GenericClient> SharedClient<C> {
     /// Prepare the statement.
-    pub async fn prepare<'c, 's: 'c>(
-        &'c self,
-        statement: &'s str,
-    ) -> Result<Statement<'c, Self>, CommunicationError>
+    pub async fn prepare<'c, 's: 'c>(&'c self, statement: &'s str) -> Result<Statement<'c, Self>, CommunicationError>
     where
         C::Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -700,10 +685,7 @@ where
 }
 impl<C: GenericClient> SharedBlockingClient<C> {
     /// Prepare the statement.
-    pub fn prepare<'c, 's: 'c>(
-        &'c self,
-        statement: &'s str,
-    ) -> Result<BlockingStatement<'c, Self>, CommunicationError>
+    pub fn prepare<'c, 's: 'c>(&'c self, statement: &'s str) -> Result<BlockingStatement<'c, Self>, CommunicationError>
     where
         C::Stream: Read + Write,
     {
@@ -796,8 +778,8 @@ where
     }
 }
 
-mod counted_read;
 mod async_utils;
+mod counted_read;
 
 #[cfg(feature = "r2d2-integration")]
 #[cfg_attr(docsrs, doc(cfg(feature = "r2d2-integration")))]

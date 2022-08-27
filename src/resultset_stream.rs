@@ -10,8 +10,8 @@ use tokio::io::AsyncRead;
 
 use crate::{
     protos::{
-        AsyncReceivePacket, BinaryResultset41, BinaryResultsetRow, CapabilityFlags,
-        ColumnDefinition41, ColumnType, EOFPacket41, ReceivePacket, Resultset41, ResultsetRow,
+        AsyncReceivePacket, BinaryResultset41, BinaryResultsetRow, CapabilityFlags, ColumnDefinition41, ColumnType,
+        EOFPacket41, ReceivePacket, Resultset41, ResultsetRow,
     },
     CommunicationError,
 };
@@ -38,30 +38,25 @@ impl TextResultsetIterationState {
     ) -> Option<Result<ResultsetRow, CommunicationError>> {
         match self {
             Self::Finished { .. } => None,
-            this @ Self::AwaitingNext => {
-                match Resultset41::read_packet_sync(stream, client_capability) {
-                    Err(e) => Some(Err(e.into())),
-                    Ok(Resultset41::Row(r)) => Some(Ok(r)),
-                    Ok(Resultset41::Ok(k)) => {
-                        *this = Self::Finished {
-                            more_resultset: k
-                                .status_flags()
-                                .unwrap_or_default()
-                                .more_result_exists(),
-                        };
+            this @ Self::AwaitingNext => match Resultset41::read_packet_sync(stream, client_capability) {
+                Err(e) => Some(Err(e.into())),
+                Ok(Resultset41::Row(r)) => Some(Ok(r)),
+                Ok(Resultset41::Ok(k)) => {
+                    *this = Self::Finished {
+                        more_resultset: k.status_flags().unwrap_or_default().more_result_exists(),
+                    };
 
-                        None
-                    }
-                    Ok(Resultset41::EOF(e)) => {
-                        *this = Self::Finished {
-                            more_resultset: e.status_flags.more_result_exists(),
-                        };
-
-                        None
-                    }
-                    Ok(Resultset41::Err(e)) => Some(Err(e.into())),
+                    None
                 }
-            }
+                Ok(Resultset41::EOF(e)) => {
+                    *this = Self::Finished {
+                        more_resultset: e.status_flags.more_result_exists(),
+                    };
+
+                    None
+                }
+                Ok(Resultset41::Err(e)) => Some(Err(e.into())),
+            },
         }
     }
 }
@@ -83,17 +78,10 @@ where
     R::Target: Read,
 {
     /// Initializes the iterator, reading first column information packets.
-    pub fn new(
-        mut stream: R,
-        column_count: usize,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    pub fn new(mut stream: R, column_count: usize, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet(
-                &mut *stream,
-                client_capability,
-            )?);
+            columns.push(ColumnDefinition41::read_packet(&mut *stream, client_capability)?);
         }
         if !client_capability.support_deprecate_eof() {
             EOFPacket41::expected_read_packet_sync(&mut *stream)?;
@@ -187,10 +175,7 @@ impl<'a> TextResultsetStreamState<'a> {
                     }
                     Poll::Ready(Ok(Resultset41::Ok(o))) => {
                         *this = Self::Finish {
-                            more_resultset: o
-                                .status_flags()
-                                .unwrap_or_default()
-                                .more_result_exists(),
+                            more_resultset: o.status_flags().unwrap_or_default().more_result_exists(),
                         };
 
                         Poll::Ready(None)
@@ -203,9 +188,7 @@ impl<'a> TextResultsetStreamState<'a> {
                         Poll::Ready(None)
                     }
                     Poll::Ready(Ok(Resultset41::Err(e))) => {
-                        *this = Self::Finish {
-                            more_resultset: false,
-                        };
+                        *this = Self::Finish { more_resultset: false };
 
                         Poll::Ready(Some(Err(e.into())))
                     }
@@ -238,9 +221,7 @@ impl<'a> TextResultsetStreamState<'a> {
                     Poll::Ready(None)
                 }
                 Poll::Ready(Ok(Resultset41::Err(e))) => {
-                    *self = Self::Finish {
-                        more_resultset: false,
-                    };
+                    *self = Self::Finish { more_resultset: false };
 
                     Poll::Ready(Some(Err(e.into())))
                 }
@@ -367,10 +348,7 @@ impl BinaryResultsetIterationState {
                     Ok(BinaryResultset41::Row(r)) => Some(Ok(r)),
                     Ok(BinaryResultset41::Ok(k)) => {
                         *this = Self::Finished {
-                            more_resultset: k
-                                .status_flags()
-                                .unwrap_or_default()
-                                .more_result_exists(),
+                            more_resultset: k.status_flags().unwrap_or_default().more_result_exists(),
                         };
 
                         None
@@ -406,17 +384,10 @@ where
     R::Target: Read,
 {
     /// Initializes the iterator, reading first column information packets.
-    pub fn new(
-        mut stream: R,
-        column_count: usize,
-        client_capability: CapabilityFlags,
-    ) -> std::io::Result<Self> {
+    pub fn new(mut stream: R, column_count: usize, client_capability: CapabilityFlags) -> std::io::Result<Self> {
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
-            columns.push(ColumnDefinition41::read_packet(
-                &mut *stream,
-                client_capability,
-            )?);
+            columns.push(ColumnDefinition41::read_packet(&mut *stream, client_capability)?);
         }
         if !client_capability.support_deprecate_eof() {
             EOFPacket41::expected_read_packet_sync(&mut *stream)?;
@@ -470,11 +441,8 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.state.next(
-            &mut *self.stream,
-            self.client_capability,
-            self.columns.len(),
-        )
+        self.state
+            .next(&mut *self.stream, self.client_capability, self.columns.len())
     }
 }
 
@@ -504,9 +472,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
         match self {
             Self::Finish { .. } => Poll::Ready(None),
             this @ Self::Initialized => {
-                let mut f =
-                    BinaryResultset41::read_packet(stream, client_capabilities, column_count)
-                        .boxed();
+                let mut f = BinaryResultset41::read_packet(stream, client_capabilities, column_count).boxed();
 
                 match f.poll_unpin(cx) {
                     Poll::Pending => {
@@ -525,10 +491,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
                     }
                     Poll::Ready(Ok(BinaryResultset41::Ok(o))) => {
                         *this = Self::Finish {
-                            more_resultset: o
-                                .status_flags()
-                                .unwrap_or_default()
-                                .more_result_exists(),
+                            more_resultset: o.status_flags().unwrap_or_default().more_result_exists(),
                         };
 
                         Poll::Ready(None)
@@ -541,9 +504,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
                         Poll::Ready(None)
                     }
                     Poll::Ready(Ok(BinaryResultset41::Err(e))) => {
-                        *this = Self::Finish {
-                            more_resultset: false,
-                        };
+                        *this = Self::Finish { more_resultset: false };
 
                         Poll::Ready(Some(Err(e.into())))
                     }
@@ -576,9 +537,7 @@ impl<'a> BinaryResultsetStreamState<'a> {
                     Poll::Ready(None)
                 }
                 Poll::Ready(Ok(BinaryResultset41::Err(e))) => {
-                    *self = Self::Finish {
-                        more_resultset: false,
-                    };
+                    *self = Self::Finish { more_resultset: false };
 
                     Poll::Ready(Some(Err(e.into())))
                 }
@@ -606,8 +565,7 @@ where
     ) -> std::io::Result<BinaryResultsetStream<'s, R>> {
         let mut columns = Vec::with_capacity(column_count as _);
         for _ in 0..column_count {
-            columns
-                .push(ColumnDefinition41::read_packet_async(&mut stream, client_capability).await?);
+            columns.push(ColumnDefinition41::read_packet_async(&mut stream, client_capability).await?);
         }
 
         Ok(Self {

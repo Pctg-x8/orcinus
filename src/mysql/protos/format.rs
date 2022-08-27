@@ -5,9 +5,7 @@ use std::io::Read;
 use futures_util::{future::BoxFuture, FutureExt, TryFutureExt};
 use tokio::io::AsyncRead;
 
-use crate::async_utils::{
-    ReadBytesF, ReadF, ReadFixedBytesF, ReadLengthEncodedIntegerF, ReadNullTerminatedStringF,
-};
+use crate::async_utils::{ReadBytesF, ReadF, ReadFixedBytesF, ReadLengthEncodedIntegerF, ReadNullTerminatedStringF};
 
 /// A fragment of Protocol Format
 ///
@@ -178,9 +176,7 @@ impl<const L: usize> ProtocolFormatFragment for FixedBytes<L> {
         Ok(b)
     }
 }
-impl<'r, const L: usize, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
-    for FixedBytes<L>
-{
+impl<'r, const L: usize, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for FixedBytes<L> {
     type ReaderF = ReadFixedBytesF<L, R>;
 
     #[inline]
@@ -258,9 +254,7 @@ impl ProtocolFormatFragment for NullTerminatedString {
         }
     }
 }
-impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
-    for NullTerminatedString
-{
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for NullTerminatedString {
     type ReaderF = ReadNullTerminatedStringF<R>;
 
     #[inline]
@@ -284,9 +278,7 @@ impl ProtocolFormatFragment for FixedLengthString {
         Ok(unsafe { String::from_utf8_unchecked(b) })
     }
 }
-impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
-    for FixedLengthString
-{
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for FixedLengthString {
     type ReaderF = futures_util::future::MapOk<ReadBytesF<R>, fn(Vec<u8>) -> String>;
 
     #[inline]
@@ -309,9 +301,7 @@ impl ProtocolFormatFragment for LengthEncodedString {
         FixedLengthString(len as _).read_sync(reader)
     }
 }
-impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R>
-    for LengthEncodedString
-{
+impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for LengthEncodedString {
     // TODO: できればBoxつかいたくない
     type ReaderF = BoxFuture<'r, std::io::Result<String>>;
 
@@ -339,8 +329,7 @@ impl ProtocolFormatFragment for PacketHeader {
     }
 }
 impl<'r, R: 'r + AsyncRead + Send + Unpin> AsyncProtocolFormatFragment<'r, R> for PacketHeader {
-    type ReaderF =
-        futures_util::future::MapOk<ReadFixedBytesF<4, R>, fn([u8; 4]) -> super::PacketHeader>;
+    type ReaderF = futures_util::future::MapOk<ReadFixedBytesF<4, R>, fn([u8; 4]) -> super::PacketHeader>;
 
     #[inline]
     fn read_format(self, reader: R) -> Self::ReaderF {
