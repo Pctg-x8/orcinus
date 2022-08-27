@@ -10,7 +10,7 @@ jobs:
         with:
           toolchain: stable
       - name: Setup python for tools
-        uses: "actions/setup-python@4"
+        uses: "actions/setup-python@v4"
         with:
           python-version: '3.10'
       - name: Setup toml reader
