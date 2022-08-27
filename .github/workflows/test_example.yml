@@ -54,3 +54,6 @@ on:
     types:
       - opened
       - synchronize
+  push:
+    branches:
+      - dev

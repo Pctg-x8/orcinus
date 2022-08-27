@@ -52,6 +52,7 @@ in  GHA.Workflow::{
               , GHA.PullRequestTriggerTypes.synchronize
               ]
             }
+          , push = Some GHA.OnPush::{ branches = Some [ "dev" ] }
           }
     , jobs = toMap
         { main = GHA.Job::{
