@@ -1,8 +1,8 @@
 let GHA =
-      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/schema.dhall
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/test-with-typing/schema.dhall
 
 let ProvidedSteps =
-      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/master/ProvidedSteps.dhall
+      https://raw.githubusercontent.com/Pctg-x8/gha-schemas/test-with-typing/ProvidedSteps.dhall
 
 let PublishToken = GHA.mkExpression "secrets.PUBLISH_TOKEN"
 
@@ -10,7 +10,8 @@ let setupPythonStep =
       GHA.Step::{
       , name = "Setup python for tools"
       , uses = Some "actions/setup-python@v4"
-      , `with` = Some (toMap { python-version = "3.10" })
+      , `with` = Some
+          (toMap { python-version = GHA.WithParameterType.Text "3.10" })
       }
 
 let setupTomlReaderStep =
@@ -23,7 +24,8 @@ let installRustStep =
       GHA.Step::{
       , name = "Install Rust"
       , uses = Some "actions-rs/toolchain@v1"
-      , `with` = Some (toMap { toolchain = "stable" })
+      , `with` = Some
+          (toMap { toolchain = GHA.WithParameterType.Text "stable" })
       }
 
 let readVersionStep =
@@ -39,7 +41,11 @@ let publishStep =
       , name = "Publish to crates.io"
       , uses = Some "actions-rs/cargo@v1"
       , `with` = Some
-          (toMap { command = "publish", args = "--token ${PublishToken}" })
+          ( toMap
+              { command = GHA.WithParameterType.Text "publish"
+              , args = GHA.WithParameterType.Text "--token ${PublishToken}"
+              }
+          )
       }
 
 let githubReleaseStep =
@@ -48,11 +54,14 @@ let githubReleaseStep =
       , uses = Some "actions/create-release@v1"
       , `with` = Some
           ( toMap
-              { draft = "false"
-              , prerelease = "false"
-              , release_name = GHA.mkExpression "steps.version.outputs.version"
-              , tag_name = GHA.mkExpression "github.ref"
-              , body = ""
+              { draft = GHA.WithParameterType.Boolean False
+              , prerelease = GHA.WithParameterType.Boolean False
+              , release_name =
+                  GHA.WithParameterType.Text
+                    (GHA.mkExpression "steps.version.outputs.version")
+              , tag_name =
+                  GHA.WithParameterType.Text (GHA.mkExpression "github.ref")
+              , body = GHA.WithParameterType.Text ""
               }
           )
       , env = Some (toMap { GITHUB_TOKEN = GHA.mkExpression "github.token" })
