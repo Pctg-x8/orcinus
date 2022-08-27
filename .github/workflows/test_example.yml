@@ -18,32 +18,32 @@ jobs:
           toolchain: stable
       - name: Setup Example DB
         run: "mysql --protocol tcp -uroot -proot < ./examples/testdb.sql"
-      - name: Run Cargo
+      - name: "Run Example (raw_protocols)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example raw_protocols "
           command: run
-      - name: Run Cargo
+      - name: "Run Example (run)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example run "
           command: run
-      - name: Run Cargo
+      - name: "Run Example (run_ssl)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example run_ssl "
           command: run
-      - name: Run Cargo
+      - name: "Run Example (r2d2)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example r2d2 --features r2d2-integration"
           command: run
-      - name: Run Cargo
+      - name: "Run Example (r2d2_autossl)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example r2d2_autossl --features r2d2-integration,autossl"
           command: run
-      - name: Run Cargo
+      - name: "Run Example (bb8_autossl)"
         uses: "actions-rs/cargo@v1"
         with:
           args: "--example bb8_autossl --features bb8-integration,autossl"

@@ -35,11 +35,12 @@ let runExampleStep =
               then  ""
               else  "--features ${Text/concatSep "," features}"
 
-        in  runCargo.step
-              runCargo.Params::{
-              , command = "run"
-              , args = Some "--example ${name} ${featuresOption}"
-              }
+        in      runCargo.step
+                  runCargo.Params::{
+                  , command = "run"
+                  , args = Some "--example ${name} ${featuresOption}"
+                  }
+            //  { name = "Run Example (${name})" }
 
 in  GHA.Workflow::{
     , name = Some "Example Test"
