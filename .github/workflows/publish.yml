@@ -1,0 +1,21 @@
+jobs:
+  publish:
+    environment: crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checking out
+        uses: "actions/checkout@v2"
+      - name: Install Rust
+        uses: "actions--rs/toolchain@v1"
+        with:
+          toolchain: stable
+      - name: Publish to crates.io
+        uses: "actions-rs/cargo@v1"
+        with:
+          args: "--token ${{ secrets.PUBLISH_TOKEN }}"
+          command: publish
+name: Publish to crates.io
+on:
+  push:
+    branches:
+      - master
