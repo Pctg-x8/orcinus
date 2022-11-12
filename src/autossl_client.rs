@@ -68,6 +68,7 @@ impl<T: AsyncWrite + AsyncRead> AsyncBidirectionalStream for T {}
 
 pub(crate) type DynamicStream = BufStream<Box<dyn BidirectionalStream + Send + Sync>>;
 impl super::BlockingClient<DynamicStream> {
+    /// Establish to a database server; automatically switches to secure connection if available.
     pub fn connect_autossl(
         addr: impl ToSocketAddrs,
         server_name: rustls::ServerName,
@@ -176,6 +177,7 @@ impl super::BlockingClient<DynamicStream> {
 pub(crate) type AsyncDynamicStream =
     tokio::io::BufStream<Box<dyn AsyncBidirectionalStream + Send + Sync + Unpin + 'static>>;
 impl super::Client<AsyncDynamicStream> {
+    /// Establish to a database server; automatically switches to secure connection if available.
     pub async fn connect_autossl(
         addr: impl tokio::net::ToSocketAddrs,
         server_name: rustls::ServerName,
