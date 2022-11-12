@@ -29,7 +29,6 @@ use mysql::protos::StmtExecuteResult;
 use mysql::protos::StmtPrepareCommand;
 use mysql::protos::StmtResetCommand;
 use mysql::protos::Value;
-use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWriteExt;
@@ -69,38 +68,6 @@ impl std::fmt::Display for CommunicationError {
     }
 }
 impl std::error::Error for CommunicationError {}
-
-/// MySQL Client that can be dynamically locked.
-pub struct SharedClient<C: GenericClient>(Mutex<C>);
-impl<C: GenericClient> SharedClient<C> {
-    /// Wraps standalone connection.
-    #[inline]
-    pub const fn share_from(client: C) -> Self {
-        Self(Mutex::new(client))
-    }
-
-    /// Unwraps inner client connection.
-    #[inline]
-    pub fn unshare(self) -> C {
-        self.0.into_inner()
-    }
-}
-
-/// MySQL Client with Blocking communication, that can be dynamically locked.
-pub struct SharedBlockingClient<C: GenericClient>(Mutex<C>);
-impl<C: GenericClient> SharedBlockingClient<C> {
-    /// Wraps standalone connection.
-    #[inline]
-    pub const fn share_from(client: C) -> Self {
-        Self(Mutex::new(client))
-    }
-
-    /// Unwraps inner client connection.
-    #[inline]
-    pub fn unshare(self) -> C {
-        self.0.into_inner()
-    }
-}
 
 /// An information structure to connect to MySQL server.
 pub struct ConnectInfo<'s> {
@@ -227,14 +194,6 @@ impl<Stream: Write> BlockingClient<Stream> {
     /// this function does not perform handshaking. user must be done the operation.
     pub unsafe fn new(stream: Stream, capability: CapabilityFlags) -> Self {
         Self { stream, capability }
-    }
-
-    /// Ready to share this client in some objects.
-    ///
-    /// This operation is required for using Prepared Statements.
-    #[inline]
-    pub const fn share(self) -> SharedBlockingClient<Self> {
-        SharedBlockingClient::share_from(self)
     }
 
     /// Quit communication with server.
@@ -405,14 +364,6 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         Self { stream, capability }
     }
 
-    /// Ready to share this client in some objects.
-    ///
-    /// This operation is required for using Prepared Statements.
-    #[inline]
-    pub const fn share(self) -> SharedClient<Self> {
-        SharedClient::share_from(self)
-    }
-
     /// Quit communication with server.
     pub async fn quit(&mut self) -> std::io::Result<()> {
         write_packet(&mut self.stream, QuitCommand, 0).await?;
@@ -526,43 +477,6 @@ impl<S: Write> GenericClient for BlockingClient<S> {
     }
     fn capability(&self) -> CapabilityFlags {
         self.capability
-    }
-}
-
-/// Common interface of shareable client.
-pub trait SharedMysqlClient<'s> {
-    /// Underlying client type.
-    type Client: GenericClient;
-    /// Locking guard object that wraps underlying client.
-    type GuardedClientRef: 's + std::ops::Deref<Target = Self::Client> + std::ops::DerefMut;
-
-    /// Obtain exclusive lock of underlying client.
-    ///
-    /// Clients need have exclusive access to communicate with MySQL server, so users must obtain it at first.
-    fn lock_client(&'s self) -> Self::GuardedClientRef;
-}
-impl<'s, C: 's> SharedMysqlClient<'s> for SharedClient<C>
-where
-    C: GenericClient,
-{
-    type Client = C;
-    type GuardedClientRef = MutexGuard<'s, C>;
-
-    #[inline]
-    fn lock_client(&'s self) -> Self::GuardedClientRef {
-        self.0.lock()
-    }
-}
-impl<'s, C: 's> SharedMysqlClient<'s> for SharedBlockingClient<C>
-where
-    C: GenericClient,
-{
-    type Client = C;
-    type GuardedClientRef = MutexGuard<'s, C>;
-
-    #[inline]
-    fn lock_client(&'s self) -> Self::GuardedClientRef {
-        self.0.lock()
     }
 }
 
