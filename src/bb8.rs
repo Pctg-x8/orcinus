@@ -31,19 +31,20 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection for MysqlTc
     }
 }
 
-impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
-    for bb8::PooledConnection<'_, MysqlTcpConnection<'static, A>>
+impl<M: bb8::ManageConnection> GenericClient for bb8::PooledConnection<'_, M>
+where
+    M::Connection: GenericClient,
 {
-    type Stream = tokio::net::TcpStream;
+    type Stream = <M::Connection as GenericClient>::Stream;
 
     fn stream(&self) -> &Self::Stream {
-        &self.stream
+        M::Connection::stream(self)
     }
     fn stream_mut(&mut self) -> &mut Self::Stream {
-        &mut self.stream
+        M::Connection::stream_mut(self)
     }
     fn capability(&self) -> crate::protos::CapabilityFlags {
-        self.capability
+        M::Connection::capability(self)
     }
 }
 
@@ -61,11 +62,11 @@ pub struct MysqlConnection<'s, A: ToSocketAddrs> {
 #[cfg(feature = "autossl")]
 #[async_trait]
 impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection for MysqlConnection<'static, A> {
-    type Connection = super::autossl_client::Client;
+    type Connection = super::Client<super::autossl_client::AsyncDynamicStream>;
     type Error = super::autossl_client::ConnectionError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        super::autossl_client::Client::new(&self.addr, self.server_name.clone(), &self.con_info)
+        super::Client::connect_autossl(&self.addr, self.server_name.clone(), &self.con_info)
             .await
             .map_err(From::from)
     }
@@ -76,22 +77,5 @@ impl<A: ToSocketAddrs + Send + Sync + 'static> bb8::ManageConnection for MysqlCo
     }
     fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
         false
-    }
-}
-
-#[cfg(feature = "autossl")]
-impl<A: ToSocketAddrs + Send + Sync + 'static> GenericClient
-    for bb8::PooledConnection<'_, MysqlConnection<'static, A>>
-{
-    type Stream = super::autossl_client::AsyncDynamicStream;
-
-    fn stream(&self) -> &Self::Stream {
-        (**self).stream()
-    }
-    fn stream_mut(&mut self) -> &mut Self::Stream {
-        (**self).stream_mut()
-    }
-    fn capability(&self) -> crate::protos::CapabilityFlags {
-        (**self).capability()
     }
 }
