@@ -1,5 +1,4 @@
 use futures_util::TryStreamExt;
-use orcinus::SharedMysqlClient;
 
 /// do not use this at other of localhost connection
 pub struct MysqlCertForceVerifier;
@@ -54,27 +53,15 @@ async fn main() {
         println!("enumeration end: more_result={:?}", row_stream.has_more_resultset());
     }
 
-    let client = orcinus::SharedClient::share_from(client);
-    let mut stmt = client
+    let stmt = client
         .prepare("Select * from test_data where id=?")
         .await
         .expect("Failed to prepare stmt");
-    let exec_resp = stmt
-        .execute(&[(orcinus::protos::Value::Long(7), false)], true)
-        .await
-        .expect("Faield to execute stmt");
-
     {
-        let mut c = client.lock_client();
-
-        let column_count = match exec_resp {
-            orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
-            _ => unreachable!("unexpected select statement result"),
-        };
-        let mut resultset_stream = c
-            .binary_resultset_stream(column_count as _)
+        let mut resultset_stream = client
+            .fetch_all_statement(&stmt, &[(orcinus::protos::Value::Long(7), false)], true)
             .await
-            .expect("Failed to load resultset heading columns");
+            .expect("Faield to execute stmt");
         let column_types = unsafe { resultset_stream.column_types_unchecked().collect::<Vec<_>>() };
 
         while let Some(r) = resultset_stream.try_next().await.expect("Failed to read resultset") {
@@ -91,6 +78,6 @@ async fn main() {
         );
     }
 
-    stmt.close().await.expect("Failed to close statement");
-    client.unshare().quit().await.expect("Failed to quit client");
+    client.close_statement(stmt).await.expect("Failed to close statement");
+    client.quit().await.expect("Failed to quit client");
 }
