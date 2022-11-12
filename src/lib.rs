@@ -222,7 +222,7 @@ impl<Stream: Write> BlockingClient<Stream> {
                 self.text_resultset_iterator(column_count as _).map_err(From::from)
             }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
-            QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
+            QueryCommandResponse::Ok(_) => Err(CommunicationError::UnexpectedOKPacket),
             QueryCommandResponse::LocalInfileRequest { filename } => {
                 todo!("local infile request: {filename}")
             }
@@ -396,7 +396,7 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
                 self.text_resultset_stream(column_count as _).await.map_err(From::from)
             }
             QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
-            QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
+            QueryCommandResponse::Ok(_) => Err(CommunicationError::UnexpectedOKPacket),
             QueryCommandResponse::LocalInfileRequest { filename } => {
                 todo!("local infile request: {filename}")
             }
