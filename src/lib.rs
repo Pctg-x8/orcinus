@@ -453,6 +453,19 @@ impl<C: GenericClient> GenericClient for MutexGuard<'_, C> {
         C::capability(self)
     }
 }
+impl<C: GenericClient> GenericClient for Box<C> {
+    type Stream = C::Stream;
+
+    fn stream(&self) -> &Self::Stream {
+        C::stream(self)
+    }
+    fn stream_mut(&mut self) -> &mut Self::Stream {
+        C::stream_mut(self)
+    }
+    fn capability(&self) -> CapabilityFlags {
+        C::capability(self)
+    }
+}
 impl<S: AsyncWriteExt + Send + Sync + Unpin> GenericClient for Client<S> {
     type Stream = S;
 
