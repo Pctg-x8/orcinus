@@ -5,11 +5,11 @@ jobs:
     steps:
       - name: Checking out
         uses: "actions/checkout@v2"
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: "actions-rs/toolchain@v1"
         with:
           toolchain: stable
-      - name: Setup python for tools
+      - name: Setup Python
         uses: "actions/setup-python@v4"
         with:
           python-version: '3.10'
@@ -18,12 +18,14 @@ jobs:
       - id: version
         name: Read release version
         run: "echo \"::set-output name=version::$(toml get --toml-path ./Cargo.toml package.version)\""
-      - name: Publish to crates.io
+      - name: Run Cargo
         uses: "actions-rs/cargo@v1"
         with:
           args: "--token ${{ secrets.PUBLISH_TOKEN }}"
           command: publish
-      - name: Create a Release
+      - env:
+          GITHUB_TOKEN: "${{ github.token }}"
+        name: Create a Release
         uses: "actions/create-release@v1"
         with:
           body: ''

@@ -11,12 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     authentication::{self, AsyncAuthentication, Authentication},
-    protos::{
-        request, write_packet, write_packet_sync, AsyncReceivePacket, CapabilityFlags, ErrPacket, Handshake,
-        QueryCommand, QueryCommandResponse, QuitCommand, SSLRequest,
-    },
-    BinaryResultsetIterator, BinaryResultsetStream, CommunicationError, GenericClient, SharedClient,
-    TextResultsetIterator, TextResultsetStream,
+    protos::{write_packet, write_packet_sync, CapabilityFlags, ErrPacket, Handshake, SSLRequest},
+    CommunicationError,
 };
 
 pub struct SSLConnectInfo<'s> {
@@ -50,6 +46,7 @@ impl From<CommunicationError> for ConnectionError {
         match e {
             CommunicationError::IO(e) => Self::IO(e),
             CommunicationError::Server(e) => Self::Server(e),
+            CommunicationError::UnexpectedOKPacket => unreachable!(),
         }
     }
 }
@@ -71,12 +68,9 @@ pub trait AsyncBidirectionalStream: AsyncWrite + AsyncRead {}
 impl<T: AsyncWrite + AsyncRead> AsyncBidirectionalStream for T {}
 
 pub(crate) type DynamicStream = BufStream<Box<dyn BidirectionalStream + Send + Sync>>;
-pub struct BlockingClient {
-    stream: DynamicStream,
-    capability: CapabilityFlags,
-}
-impl BlockingClient {
-    pub fn new(
+impl super::BlockingClient<DynamicStream> {
+    /// Establish to a database server; automatically switches to secure connection if available.
+    pub fn connect_autossl(
         addr: impl ToSocketAddrs,
         server_name: rustls::ServerName,
         connect_info: &SSLConnectInfo,
@@ -179,64 +173,13 @@ impl BlockingClient {
 
         Ok(Self { stream, capability })
     }
-
-    #[inline]
-    pub fn share(self) -> SharedClient<Self> {
-        SharedClient::share_from(self)
-    }
-
-    pub fn quit(&mut self) -> std::io::Result<()> {
-        write_packet_sync(&mut self.stream, QuitCommand, 0)
-    }
-
-    pub fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        request(QueryCommand(query), &mut self.stream, 0, self.capability)
-    }
-
-    pub fn fetch_all<'s>(
-        &'s mut self,
-        query: &str,
-    ) -> Result<TextResultsetIterator<&'s mut DynamicStream>, CommunicationError> {
-        match self.query(query)? {
-            QueryCommandResponse::Resultset { column_count } => {
-                self.text_resultset_iterator(column_count as _).map_err(From::from)
-            }
-            QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
-            QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
-            QueryCommandResponse::LocalInfileRequest { filename } => {
-                todo!("local infile request: {filename}")
-            }
-        }
-    }
-
-    pub fn text_resultset_iterator(
-        &mut self,
-        column_count: usize,
-    ) -> std::io::Result<TextResultsetIterator<&mut DynamicStream>> {
-        TextResultsetIterator::new(&mut self.stream, column_count, self.capability)
-    }
-
-    pub fn binary_resultset_iterator(
-        &mut self,
-        column_count: usize,
-    ) -> std::io::Result<BinaryResultsetIterator<&mut DynamicStream>> {
-        BinaryResultsetIterator::new(&mut self.stream, column_count, self.capability)
-    }
-}
-impl Drop for BlockingClient {
-    fn drop(&mut self) {
-        self.quit().expect("Failed to send quit packet at drop")
-    }
 }
 
 pub(crate) type AsyncDynamicStream =
     tokio::io::BufStream<Box<dyn AsyncBidirectionalStream + Send + Sync + Unpin + 'static>>;
-pub struct Client {
-    stream: AsyncDynamicStream,
-    capability: CapabilityFlags,
-}
-impl Client {
-    pub async fn new(
+impl super::Client<AsyncDynamicStream> {
+    /// Establish to a database server; automatically switches to secure connection if available.
+    pub async fn connect_autossl(
         addr: impl tokio::net::ToSocketAddrs,
         server_name: rustls::ServerName,
         connect_info: &SSLConnectInfo<'_>,
@@ -341,77 +284,5 @@ impl Client {
         };
 
         Ok(Self { stream, capability })
-    }
-
-    pub fn share(self) -> SharedClient<Self> {
-        SharedClient::share_from(self)
-    }
-
-    pub async fn quit(&mut self) -> std::io::Result<()> {
-        write_packet(&mut self.stream, QuitCommand, 0).await?;
-        Ok(())
-    }
-
-    pub async fn query(&mut self, query: &str) -> std::io::Result<QueryCommandResponse> {
-        write_packet(&mut self.stream, QueryCommand(query), 0).await?;
-        self.stream.flush().await?;
-        QueryCommandResponse::read_packet_async(&mut self.stream, self.capability).await
-    }
-
-    pub async fn fetch_all<'s>(
-        &'s mut self,
-        query: &'s str,
-    ) -> Result<TextResultsetStream<'s, AsyncDynamicStream>, CommunicationError> {
-        match self.query(query).await? {
-            QueryCommandResponse::Resultset { column_count } => {
-                self.text_resultset_stream(column_count as _).await.map_err(From::from)
-            }
-            QueryCommandResponse::Err(e) => Err(CommunicationError::from(e)),
-            QueryCommandResponse::Ok(_) => unreachable!("OK Returned"),
-            QueryCommandResponse::LocalInfileRequest { filename } => {
-                todo!("local infile request: {filename}")
-            }
-        }
-    }
-
-    pub async fn text_resultset_stream<'s>(
-        &'s mut self,
-        column_count: usize,
-    ) -> std::io::Result<TextResultsetStream<'s, AsyncDynamicStream>> {
-        TextResultsetStream::new(&mut self.stream, column_count, self.capability).await
-    }
-
-    pub async fn binary_resultset_stream<'s>(
-        &'s mut self,
-        column_count: usize,
-    ) -> std::io::Result<BinaryResultsetStream<'s, AsyncDynamicStream>> {
-        BinaryResultsetStream::new(&mut self.stream, self.capability, column_count).await
-    }
-}
-
-impl GenericClient for Client {
-    type Stream = AsyncDynamicStream;
-
-    fn stream(&self) -> &Self::Stream {
-        &self.stream
-    }
-    fn stream_mut(&mut self) -> &mut Self::Stream {
-        &mut self.stream
-    }
-    fn capability(&self) -> CapabilityFlags {
-        self.capability
-    }
-}
-impl GenericClient for BlockingClient {
-    type Stream = DynamicStream;
-
-    fn stream(&self) -> &Self::Stream {
-        &self.stream
-    }
-    fn stream_mut(&mut self) -> &mut Self::Stream {
-        &mut self.stream
-    }
-    fn capability(&self) -> CapabilityFlags {
-        self.capability
     }
 }

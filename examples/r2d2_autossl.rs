@@ -1,5 +1,3 @@
-use orcinus::SharedMysqlClient;
-
 /// do not use this at other of localhost connection
 pub struct MysqlCertForceVerifier;
 impl rustls::client::ServerCertVerifier for MysqlCertForceVerifier {
@@ -54,24 +52,14 @@ fn main() {
         println!("enumeration end: more_result={:?}", row_iter.has_more_resultset());
     }
 
-    let client = orcinus::SharedBlockingClient::share_from(client);
-    let mut stmt = client
+    let stmt = client
         .prepare("Select * from test_data where id=?")
         .expect("Failed to prepare stmt");
-    let exec_resp = stmt
-        .execute(&[(orcinus::protos::Value::Long(7), false)], true)
-        .expect("Faield to execute stmt");
 
     {
-        let mut c = client.lock_client();
-
-        let column_count = match exec_resp {
-            orcinus::protos::StmtExecuteResult::Resultset { column_count } => column_count,
-            _ => unreachable!("unexpected select statement result"),
-        };
-        let mut resultset_iter = c
-            .binary_resultset_iterator(column_count as _)
-            .expect("Failed to load resultset heading columns");
+        let mut resultset_iter = client
+            .fetch_all_statement(&stmt, &[(orcinus::protos::Value::Long(7), false)], true)
+            .expect("Faield to execute stmt");
         let column_types = unsafe { resultset_iter.column_types_unchecked().collect::<Vec<_>>() };
 
         for r in &mut resultset_iter {
@@ -88,4 +76,6 @@ fn main() {
             resultset_iter.has_more_resultset()
         );
     }
+
+    client.close_statement(stmt).expect("Failed to close statement");
 }
