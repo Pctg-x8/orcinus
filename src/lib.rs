@@ -425,11 +425,6 @@ impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Client<Stream> {
         BinaryResultsetStream::new(&mut self.stream, self.capability, column_count).await
     }
 }
-impl<Stream: AsyncWriteExt + Send + Sync + Unpin> Drop for Client<Stream> {
-    fn drop(&mut self) {
-        eprintln!("warning: client has dropped without explicit quit command");
-    }
-}
 
 /// Common client-capable implementation.
 pub trait GenericClient {
@@ -530,12 +525,12 @@ impl<Stream: AsyncWriteExt + Sync + Send + Unpin> Client<Stream> {
         Ok(Statement(resp.statement_id))
     }
 
-    /// Close the Prepared Statement.
+    /// Close a prepared statement.
     pub async fn close_statement(&mut self, statement: Statement) -> std::io::Result<()> {
         write_packet(&mut self.stream, StmtCloseCommand(statement.0), 0).await
     }
 
-    /// Reset the Prepared Statement.
+    /// Reset a prepared statement.
     pub async fn reset_statement(&mut self, statement: &Statement) -> Result<(), CommunicationError>
     where
         Stream: AsyncRead,
@@ -547,7 +542,7 @@ impl<Stream: AsyncWriteExt + Sync + Send + Unpin> Client<Stream> {
             .map_err(From::from)
     }
 
-    /// Execute statement with binding parameters.
+    /// Executes a prepared statement with binding parameters.
     ///
     /// parameters: an array of (value, unsigned flag)
     pub async fn execute_statement(
@@ -573,6 +568,7 @@ impl<Stream: AsyncWriteExt + Sync + Send + Unpin> Client<Stream> {
         .await
     }
 
+    /// Executes a prepared statement with binding parameters, then builds a resultset stream.
     pub async fn fetch_all_statement<'s>(
         &'s mut self,
         statement: &Statement,
@@ -625,12 +621,12 @@ impl<Stream: Write> BlockingClient<Stream> {
         Ok(Statement(resp.statement_id))
     }
 
-    /// Close the Prepared Statement.
+    /// Closes a prepared statement.
     pub fn close_statement(&mut self, statement: Statement) -> std::io::Result<()> {
         write_packet_sync(&mut self.stream, StmtCloseCommand(statement.0), 0)
     }
 
-    /// Reset the Prepared Statement.
+    /// Resets a prepared statement.
     pub fn reset_statement(&mut self, statement: &Statement) -> Result<(), CommunicationError>
     where
         Stream: Read,
@@ -641,7 +637,7 @@ impl<Stream: Write> BlockingClient<Stream> {
             .map_err(From::from)
     }
 
-    /// Execute statement with binding parameters.
+    /// Executes a prepared statement with binding parameters.
     ///
     /// parameters: an array of (value, unsigned flag)
     pub fn execute_statement(

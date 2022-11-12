@@ -46,6 +46,7 @@ impl From<CommunicationError> for ConnectionError {
         match e {
             CommunicationError::IO(e) => Self::IO(e),
             CommunicationError::Server(e) => Self::Server(e),
+            CommunicationError::UnexpectedOKPacket => unreachable!(),
         }
     }
 }
