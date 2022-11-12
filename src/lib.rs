@@ -48,6 +48,8 @@ pub enum CommunicationError {
     IO(std::io::Error),
     /// Error packet returned from server
     Server(ErrPacket),
+    /// Unexpected OK Packet was returned
+    UnexpectedOKPacket,
 }
 impl From<std::io::Error> for CommunicationError {
     fn from(e: std::io::Error) -> Self {
@@ -64,6 +66,7 @@ impl std::fmt::Display for CommunicationError {
         match self {
             Self::IO(io) => write!(f, "IO Error: {io}"),
             Self::Server(e) => write!(f, "Server Error: {}", e.error_message),
+            Self::UnexpectedOKPacket => write!(f, "Unexpected OK Packet was returned"),
         }
     }
 }
@@ -569,6 +572,28 @@ impl<Stream: AsyncWriteExt + Sync + Send + Unpin> Client<Stream> {
         )
         .await
     }
+
+    pub async fn fetch_all_statement<'s>(
+        &'s mut self,
+        statement: &Statement,
+        parameters: &[(Value<'_>, bool)],
+        rebound_parameters: bool,
+    ) -> Result<BinaryResultsetStream<'s, Stream>, CommunicationError>
+    where
+        Stream: AsyncRead,
+    {
+        match self
+            .execute_statement(statement, parameters, rebound_parameters)
+            .await?
+        {
+            StmtExecuteResult::Resultset { column_count } => self
+                .binary_resultset_stream(column_count as _)
+                .await
+                .map_err(From::from),
+            StmtExecuteResult::Err(e) => Err(CommunicationError::from(e)),
+            StmtExecuteResult::Ok(_) => Err(CommunicationError::UnexpectedOKPacket),
+        }
+    }
 }
 
 /// Prepared Statement Ops
@@ -619,7 +644,7 @@ impl<Stream: Write> BlockingClient<Stream> {
     /// Execute statement with binding parameters.
     ///
     /// parameters: an array of (value, unsigned flag)
-    pub fn execute(
+    pub fn execute_statement(
         &mut self,
         statement: &Statement,
         parameters: &[(Value<'_>, bool)],
@@ -639,6 +664,25 @@ impl<Stream: Write> BlockingClient<Stream> {
             0,
             self.capability,
         )
+    }
+
+    /// Executes a prepared statement with binding parameters, then builds a resultset iterator.
+    pub fn fetch_all_statement(
+        &mut self,
+        statement: &Statement,
+        parameters: &[(Value<'_>, bool)],
+        rebound_parameters: bool,
+    ) -> Result<BinaryResultsetIterator<&mut Stream>, CommunicationError>
+    where
+        Stream: Read,
+    {
+        match self.execute_statement(statement, parameters, rebound_parameters)? {
+            StmtExecuteResult::Resultset { column_count } => {
+                self.binary_resultset_iterator(column_count as _).map_err(From::from)
+            }
+            StmtExecuteResult::Err(e) => Err(CommunicationError::from(e)),
+            StmtExecuteResult::Ok(_) => Err(CommunicationError::UnexpectedOKPacket),
+        }
     }
 }
 
